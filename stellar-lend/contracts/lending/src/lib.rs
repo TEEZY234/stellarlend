@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(deprecated)]
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Val, Vec};
 
 mod borrow;
@@ -40,10 +41,7 @@ use views::{
     get_user_position as view_user_position, UserPositionSummary,
 };
 
-use withdraw::{
-    initialize_withdraw_settings as initialize_withdraw_logic,
-    set_withdraw_paused as set_withdraw_paused_logic, withdraw as withdraw_logic, WithdrawError,
-};
+use withdraw::withdraw as withdraw_logic;
 mod data_store;
 use stellarlend_common::upgrade;
 pub use stellarlend_common::upgrade::{UpgradeError, UpgradeStage, UpgradeStatus};
@@ -67,6 +65,8 @@ mod views_test;
 mod data_store_test;
 #[cfg(test)]
 mod math_safety_test;
+#[cfg(test)]
+mod race_tests;
 #[cfg(test)]
 mod upgrade_test;
 #[cfg(test)]

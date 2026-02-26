@@ -29,127 +29,81 @@ pub mod storage;
 pub mod types;
 pub mod withdraw;
 
-#[cfg(test)]
-mod tests;
-
-use crate::deposit::{AssetParams, DepositDataKey, ProtocolAnalytics};
+use crate::deposit::{DepositDataKey, ProtocolAnalytics};
 use crate::oracle::OracleConfig;
 use crate::risk_management::{RiskConfig, RiskManagementError};
 use crate::config_snapshot::{get_config_snapshot, ConfigSnapshot};
-
-use borrow::borrow_asset;
-use deposit::deposit_collateral;
-use repay::repay_debt;
-
-use risk_management::{
-    check_emergency_pause, initialize_risk_management, is_emergency_paused, is_operation_paused,
-    require_admin, set_pause_switch, set_pause_switches, RiskConfig, RiskManagementError,
-};
-use risk_params::{
-    can_be_liquidated, get_liquidation_incentive_amount, get_max_liquidatable_amount,
-    initialize_risk_params, require_min_collateral_ratio, RiskParamsError,
-};
-use withdraw::withdraw_collateral;
-
-mod analytics;
 
 use analytics::{
     generate_protocol_report, generate_user_report, get_recent_activity, get_user_activity_feed,
     AnalyticsError, ProtocolReport, UserReport,
 };
 
-mod cross_asset;
 use cross_asset::{
     get_asset_config_by_address, get_asset_list, get_user_asset_position,
     get_user_position_summary, initialize_asset, update_asset_config, update_asset_price,
     AssetConfig, AssetKey, AssetPosition, CrossAssetError, UserPositionSummary,
 };
 
-mod oracle;
 use oracle::{
     configure_oracle, get_price, set_fallback_oracle, set_primary_oracle, update_price_feed,
-    OracleConfig,
 };
 
-mod config;
 use config::{config_backup, config_get, config_restore, config_set, ConfigError};
 
-mod flash_loan;
-use flash_loan::{
-    configure_flash_loan, execute_flash_loan, repay_flash_loan, set_flash_loan_fee, FlashLoanConfig,
-};
+use flash_loan::FlashLoanConfig;
 
-mod bridge;
 #[allow(unused_imports)]
 use bridge::{
     bridge_deposit, bridge_withdraw, get_bridge_config, list_bridges, register_bridge,
     set_bridge_fee, BridgeConfig, BridgeError,
 };
 
-mod liquidate;
 use liquidate::liquidate;
 
 pub mod reentrancy;
 
-mod interest_rate;
-#[allow(unused_imports)]
 use interest_rate::{
-    get_current_borrow_rate, get_current_supply_rate, get_current_utilization,
-    initialize_interest_rate_config, set_emergency_rate_adjustment, update_interest_rate_config,
-    InterestRateError,
+    initialize_interest_rate_config, update_interest_rate_config, InterestRateError,
 };
 
-mod governance;
+use risk_management::{
+    check_emergency_pause, initialize_risk_management, is_emergency_paused, is_operation_paused,
+    require_admin, set_pause_switch, RiskManagementError as _,
+};
+
+use risk_params::{
+    can_be_liquidated, get_liquidation_incentive_amount, get_max_liquidatable_amount,
+    initialize_risk_params, require_min_collateral_ratio, RiskParamsError,
+};
 
 use storage::GuardianConfig;
 
-// Governance module
 use crate::types::{
     GovernanceConfig, MultisigConfig, Proposal, ProposalOutcome, ProposalType, RecoveryRequest,
     VoteInfo, VoteType,
 };
-// use crate::governance::self;
 
 /// The StellarLend core contract.
-///
-/// Provides the public API for all lending protocol operations. Each method
-/// delegates to the corresponding module implementation and converts internal
-/// errors into panics for Soroban's contract-call semantics.
-
 #[contract]
 pub struct HelloContract;
 
 #[contractimpl]
 impl HelloContract {
-    /// Deposit assets into the protocol
-    /// Health-check endpoint.
-    ///
-    /// Returns the string `"Hello"` to verify the contract is deployed and callable.
-    pub fn hello(env: Env) -> String {
-        String::from_str(&env, "Hello")
+    /// Health-check endpoint. Returns "Hello".
+    pub fn hello(env: Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(&env, "Hello")
     }
 
     /// Initialize the contract with admin address.
-    ///
-    /// Sets up the risk management system and interest rate model with default parameters.
-    /// Must be called before any other operations.
-    ///
-    /// # Arguments
-    /// * `admin` - The admin address
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
     pub fn initialize(env: Env, admin: Address) -> Result<(), RiskManagementError> {
-        // Prevent double initialization
         if crate::admin::has_admin(&env) {
-            return Err(RiskManagementError::Unauthorized); // or a specific error
+            return Err(RiskManagementError::Unauthorized);
         }
-
         crate::admin::set_admin(&env, admin.clone(), None)
             .map_err(|_| RiskManagementError::Unauthorized)?;
         initialize_risk_management(&env, admin.clone())?;
         initialize_risk_params(&env).map_err(|_| RiskManagementError::InvalidParameter)?;
-        // Initialize interest rate config with default parameters
         initialize_interest_rate_config(&env, admin.clone()).map_err(|e| {
             if e == InterestRateError::AlreadyInitialized {
                 RiskManagementError::AlreadyInitialized
@@ -160,11 +114,7 @@ impl HelloContract {
         Ok(())
     }
 
-    /// Transfer super admin rights
-    ///
-    /// # Arguments
-    /// * `caller` - The current admin
-    /// * `new_admin` - The new admin
+    /// Transfer super admin rights.
     pub fn transfer_admin(
         env: Env,
         caller: Address,
@@ -173,7 +123,7 @@ impl HelloContract {
         crate::admin::set_admin(&env, new_admin, Some(caller))
     }
 
-    /// Grant a role to an address (admin only)
+    /// Grant a role to an address (admin only).
     pub fn grant_role(
         env: Env,
         caller: Address,
@@ -183,7 +133,7 @@ impl HelloContract {
         crate::admin::grant_role(&env, caller, role, account)
     }
 
-    /// Revoke a role from an address (admin only)
+    /// Revoke a role from an address (admin only).
     pub fn revoke_role(
         env: Env,
         caller: Address,
@@ -193,56 +143,26 @@ impl HelloContract {
         crate::admin::revoke_role(&env, caller, role, account)
     }
 
-    /// Deposit collateral into the protocol
-    ///
-    /// Allows users to deposit assets as collateral in the protocol.
-    /// Supports multiple asset types including XLM (native) and token contracts (USDC, etc.).
-    ///
-    /// # Arguments
-    /// * `user` - The address of the user depositing collateral
-    /// * `asset` - The address of the asset contract to deposit (None for native XLM)
-    /// * `amount` - The amount to deposit
-    ///
-    /// # Returns
-    /// Returns the updated collateral balance for the user
-    ///
-    /// # Events
-    /// Emits the following events:
-    /// - `deposit`: Deposit transaction event
-    /// - `position_updated`: User position update event
-    /// - `analytics_updated`: Analytics update event
-    /// - `user_activity_tracked`: User activity tracking event
+    /// Deposit collateral into the protocol.
     pub fn deposit_collateral(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<i128, crate::deposit::DepositError> {
-        deposit::deposit_collateral(&env, user, asset, amount)
+        crate::deposit::deposit_collateral(&env, user, asset, amount)
     }
 
-    /// Set native asset address (admin only). Required before using asset = None for deposit/borrow/repay.
+    /// Set native asset address (admin only).
     pub fn set_native_asset_address(
         env: Env,
         caller: Address,
         native_asset: Address,
-    ) -> Result<(), deposit::DepositError> {
-        deposit::set_native_asset_address(&env, caller, native_asset)
+    ) -> Result<(), crate::deposit::DepositError> {
+        crate::deposit::set_native_asset_address(&env, caller, native_asset)
     }
 
-    /// Set risk parameters (admin only)
-    ///
-    /// Updates risk parameters with validation and change limits.
-    ///
-    /// # Arguments
-    /// * `caller` - The caller address (must be admin)
-    /// * `min_collateral_ratio` - Optional new minimum collateral ratio (in basis points)
-    /// * `liquidation_threshold` - Optional new liquidation threshold (in basis points)
-    /// * `close_factor` - Optional new close factor (in basis points)
-    /// * `liquidation_incentive` - Optional new liquidation incentive (in basis points)
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Set risk parameters (admin only).
     pub fn set_risk_params(
         env: Env,
         caller: Address,
@@ -341,47 +261,43 @@ impl HelloContract {
         multisig::ms_execute(&env, executor, proposal_id)
     }
 
-    /// Set pause switch for an operation (admin only)
-    ///
-    /// # Arguments
-    /// * `caller` - The caller address (must be admin)
-    /// * `operation` - The operation symbol (e.g., "pause_deposit", "pause_borrow")
-    /// * `paused` - Whether to pause (true) or unpause (false)
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
-    pub fn set_pause_switch(
+    /// Borrow assets from the protocol.
+    pub fn borrow_asset(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<i128, crate::borrow::BorrowError> {
-        borrow::borrow_asset(&env, user, asset, amount)
+        crate::borrow::borrow_asset(&env, user, asset, amount)
     }
 
-    /// Repay borrowed assets
+    /// Repay borrowed assets.
     pub fn repay_debt(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<(i128, i128, i128), crate::repay::RepayError> {
-        repay::repay_debt(&env, user, asset, amount)
+        crate::repay::repay_debt(&env, user, asset, amount)
     }
 
-    /// Liquidate an undercollateralized position
-    pub fn liquidate(env: Env, caller: Address, paused: bool) -> Result<(), RiskManagementError> {
-        risk_management::set_emergency_pause(&env, caller, paused)
+    /// Liquidate an undercollateralized position.
+    pub fn liquidate(
+        env: Env,
+        caller: Address,
+        borrower: Address,
+        asset: Option<Address>,
+        amount: i128,
+    ) -> Result<i128, crate::liquidate::LiquidateError> {
+        liquidate(&env, caller, borrower, asset, amount)
     }
 
-    /// Get current risk configuration
-    ///
-    /// # Returns
-    /// Returns the current risk configuration or None if not initialized
+    /// Get current risk configuration.
     pub fn get_risk_config(env: Env) -> Option<RiskConfig> {
         risk_management::get_risk_config(&env)
     }
 
+    /// Get minimum collateral ratio.
     /// Get a read-only configuration snapshot of the protocol
     ///
     /// # Returns
@@ -400,43 +316,34 @@ impl HelloContract {
             .map_err(|_| RiskManagementError::InvalidParameter)
     }
 
-    /// Get liquidation threshold
-    ///
-    /// # Returns
-    /// Returns the liquidation threshold in basis points
+    /// Get liquidation threshold.
     pub fn get_liquidation_threshold(env: Env) -> Result<i128, RiskManagementError> {
         risk_params::get_liquidation_threshold(&env)
             .map_err(|_| RiskManagementError::InvalidParameter)
     }
 
-    /// Get close factor
-    ///
-    /// # Returns
-    /// Returns the close factor in basis points
+    /// Get close factor.
     pub fn get_close_factor(env: Env) -> Result<i128, RiskManagementError> {
         risk_params::get_close_factor(&env).map_err(|_| RiskManagementError::InvalidParameter)
     }
 
-    /// Get liquidation incentive
-    ///
-    /// # Returns
-    /// Returns the liquidation incentive in basis points
+    /// Get liquidation incentive.
     pub fn get_liquidation_incentive(env: Env) -> Result<i128, RiskManagementError> {
         risk_params::get_liquidation_incentive(&env)
             .map_err(|_| RiskManagementError::InvalidParameter)
     }
 
-    /// Get current borrow rate (in basis points)
+    /// Get current borrow rate (in basis points).
     pub fn get_borrow_rate(env: Env) -> i128 {
         interest_rate::calculate_borrow_rate(&env).unwrap_or(0)
     }
 
-    /// Get current supply rate (in basis points)
+    /// Get current supply rate (in basis points).
     pub fn get_supply_rate(env: Env) -> i128 {
         interest_rate::calculate_supply_rate(&env).unwrap_or(0)
     }
 
-    /// Update interest rate model configuration (admin only)
+    /// Update interest rate model configuration (admin only).
     #[allow(clippy::too_many_arguments)]
     pub fn update_interest_rate_config(
         env: Env,
@@ -449,18 +356,31 @@ impl HelloContract {
         rate_ceiling: Option<i128>,
         spread: Option<i128>,
     ) -> Result<(), RiskManagementError> {
+        interest_rate::update_interest_rate_config(
+            &env,
+            admin,
+            base_rate,
+            kink,
+            multiplier,
+            jump_multiplier,
+            rate_floor,
+            rate_ceiling,
+            spread,
+        )
+        .map_err(|_| RiskManagementError::InvalidParameter)
+    }
+
+    /// Check if a position meets minimum collateral ratio.
+    pub fn check_min_collateral_ratio(
+        env: Env,
+        collateral_value: i128,
+        debt_value: i128,
+    ) -> Result<(), RiskManagementError> {
         require_min_collateral_ratio(&env, collateral_value, debt_value)
             .map_err(|_| RiskManagementError::InsufficientCollateralRatio)
     }
 
-    /// Check if position can be liquidated
-    ///
-    /// # Arguments
-    /// * `collateral_value` - Total collateral value (in base units)
-    /// * `debt_value` - Total debt value (in base units)
-    ///
-    /// # Returns
-    /// Returns true if position can be liquidated
+    /// Check if position can be liquidated.
     pub fn can_be_liquidated(
         env: Env,
         collateral_value: i128,
@@ -470,21 +390,15 @@ impl HelloContract {
             .map_err(|_| RiskManagementError::InvalidParameter)
     }
 
-    /// Manual emergency interest rate adjustment (admin only)
-    pub fn set_emergency_rate_adjustment(
+    /// Get maximum liquidatable amount.
+    pub fn get_max_liquidatable_amount(
         env: Env,
         debt_value: i128,
     ) -> Result<i128, RiskManagementError> {
         get_max_liquidatable_amount(&env, debt_value).map_err(|_| RiskManagementError::Overflow)
     }
 
-    /// Calculate liquidation incentive amount
-    ///
-    /// # Arguments
-    /// * `liquidated_amount` - Amount being liquidated (in base units)
-    ///
-    /// # Returns
-    /// Liquidation incentive amount
+    /// Calculate liquidation incentive amount.
     pub fn get_liquidation_incentive_amount(
         env: Env,
         liquidated_amount: i128,
@@ -493,12 +407,12 @@ impl HelloContract {
             .map_err(|_| RiskManagementError::Overflow)
     }
 
-    /// Refresh analytics for a user
+    /// Refresh analytics for a user.
     pub fn refresh_user_analytics(_env: Env, _user: Address) -> Result<(), RiskManagementError> {
         Ok(())
     }
 
-    /// Claim accumulated protocol reserves (admin only)
+    /// Claim accumulated protocol reserves (admin only).
     pub fn claim_reserves(
         env: Env,
         caller: Address,
@@ -534,7 +448,7 @@ impl HelloContract {
         Ok(())
     }
 
-    /// Get current protocol reserve balance for an asset
+    /// Get current protocol reserve balance for an asset.
     pub fn get_reserve_balance(env: Env, asset: Option<Address>) -> i128 {
         let reserve_key = DepositDataKey::ProtocolReserve(asset);
         env.storage()
@@ -544,47 +458,16 @@ impl HelloContract {
     }
 
     /// Generate a comprehensive protocol report.
-    ///
-    /// Aggregates TVL, utilization, average borrow rate, and user/transaction counts
-    /// into a single [`ProtocolReport`] snapshot.
-    ///
-    /// # Returns
-    /// A `ProtocolReport` containing current protocol metrics and timestamp.
-    ///
-    /// # Errors
-    /// Returns `AnalyticsError` if protocol data is not initialized or computation overflows.
     pub fn get_protocol_report(env: Env) -> Result<ProtocolReport, AnalyticsError> {
         generate_protocol_report(&env)
     }
 
     /// Generate a comprehensive report for a specific user.
-    ///
-    /// Includes the user's position, health factor, risk level, activity history,
-    /// and cumulative transaction metrics.
-    ///
-    /// # Arguments
-    /// * `user` - The address of the user to report on
-    ///
-    /// # Returns
-    /// A `UserReport` with the user's metrics, position, and recent activities.
-    ///
-    /// # Errors
-    /// Returns `AnalyticsError::DataNotFound` if the user has no recorded activity.
     pub fn get_user_report(env: Env, user: Address) -> Result<UserReport, AnalyticsError> {
         generate_user_report(&env, &user)
     }
 
     /// Retrieve recent protocol activity entries.
-    ///
-    /// Returns a paginated list of the most recent protocol activities in
-    /// reverse chronological order.
-    ///
-    /// # Arguments
-    /// * `limit` - Maximum number of entries to return
-    /// * `offset` - Number of entries to skip from the most recent
-    ///
-    /// # Returns
-    /// A vector of `ActivityEntry` records.
     pub fn get_recent_activity(
         env: Env,
         limit: u32,
@@ -594,17 +477,6 @@ impl HelloContract {
     }
 
     /// Retrieve activity entries for a specific user.
-    ///
-    /// Returns a paginated list of the user's activities in reverse
-    /// chronological order.
-    ///
-    /// # Arguments
-    /// * `user` - The address of the user
-    /// * `limit` - Maximum number of entries to return
-    /// * `offset` - Number of entries to skip from the most recent
-    ///
-    /// # Returns
-    /// A vector of `ActivityEntry` records for the specified user.
     pub fn get_user_activity(
         env: Env,
         user: Address,
@@ -614,7 +486,26 @@ impl HelloContract {
         get_user_activity_feed(&env, &user, limit, offset)
     }
 
-    /// Update price feed from oracle
+    /// Get user analytics metrics.
+    pub fn get_user_analytics(
+        env: Env,
+        user: Address,
+    ) -> Result<crate::analytics::UserMetrics, crate::analytics::AnalyticsError> {
+        analytics::get_user_activity_summary(&env, &user)
+    }
+
+    /// Get protocol analytics metrics.
+    pub fn get_protocol_analytics(
+        env: Env,
+    ) -> Result<crate::analytics::ProtocolMetrics, crate::analytics::AnalyticsError> {
+        analytics::get_protocol_stats(&env)
+    }
+
+    // ============================================================================
+    // Oracle Methods
+    // ============================================================================
+
+    /// Update price feed from oracle.
     pub fn update_price_feed(
         env: Env,
         caller: Address,
@@ -627,28 +518,23 @@ impl HelloContract {
             .expect("Oracle error")
     }
 
-    /// Get current price for an asset
+    /// Get current price for an asset.
     pub fn get_price(env: Env, asset: Address) -> i128 {
         oracle::get_price(&env, &asset).expect("Oracle error")
     }
 
-    /// Configure oracle parameters (admin only)
+    /// Configure oracle parameters (admin only).
     pub fn configure_oracle(env: Env, caller: Address, config: OracleConfig) {
         oracle::configure_oracle(&env, caller, config).expect("Oracle error")
     }
 
-    /// Set primary oracle for an asset (admin only)
-    ///
-    /// # Arguments
-    /// * `caller` - The caller address (must be admin)
-    /// * `asset` - The asset address
-    /// * `primary_oracle` - The primary oracle address
+    /// Set primary oracle for an asset (admin only).
     pub fn set_primary_oracle(env: Env, caller: Address, asset: Address, primary_oracle: Address) {
         set_primary_oracle(&env, caller, asset, primary_oracle)
             .unwrap_or_else(|e| panic!("Oracle error: {:?}", e))
     }
 
-    /// Set fallback oracle for an asset (admin only)
+    /// Set fallback oracle for an asset (admin only).
     pub fn set_fallback_oracle(
         env: Env,
         caller: Address,
@@ -658,45 +544,16 @@ impl HelloContract {
         oracle::set_fallback_oracle(&env, caller, asset, fallback_oracle).expect("Oracle error")
     }
 
-    /// Get recent activity from analytics
-    pub fn get_recent_activity(
-        env: Env,
-        limit: u32,
-        offset: u32,
-    ) -> Result<Vec<crate::analytics::ActivityEntry>, crate::analytics::AnalyticsError> {
-        analytics::get_recent_activity(&env, limit, offset)
-    }
+    // ============================================================================
+    // Risk Management Methods
+    // ============================================================================
 
-    /// Initialize risk management (admin only)
+    /// Initialize risk management (admin only).
     pub fn initialize_risk_management(env: Env, admin: Address) -> Result<(), RiskManagementError> {
         risk_management::initialize_risk_management(&env, admin)
     }
 
-    /// Get current risk configuration
-    pub fn get_risk_config(env: Env) -> Option<RiskConfig> {
-        risk_management::get_risk_config(&env)
-    }
-
-    /// Set risk management parameters (admin only)
-    pub fn set_risk_params(
-        env: Env,
-        admin: Address,
-        min_collateral_ratio: Option<i128>,
-        liquidation_threshold: Option<i128>,
-        close_factor: Option<i128>,
-        liquidation_incentive: Option<i128>,
-    ) -> Result<(), RiskManagementError> {
-        risk_management::set_risk_params(
-            &env,
-            admin,
-            min_collateral_ratio,
-            liquidation_threshold,
-            close_factor,
-            liquidation_incentive,
-        )
-    }
-
-    /// Set a pause switch for an operation (admin only)
+    /// Set a pause switch for an operation (admin only).
     pub fn set_pause_switch(
         env: Env,
         admin: Address,
@@ -706,17 +563,17 @@ impl HelloContract {
         risk_management::set_pause_switch(&env, admin, operation, paused)
     }
 
-    /// Check if an operation is paused
+    /// Check if an operation is paused.
     pub fn is_operation_paused(env: Env, operation: Symbol) -> bool {
         risk_management::is_operation_paused(&env, operation)
     }
 
-    /// Check if emergency pause is active
+    /// Check if emergency pause is active.
     pub fn is_emergency_paused(env: Env) -> bool {
         risk_management::is_emergency_paused(&env)
     }
 
-    /// Set emergency pause (admin only)
+    /// Set emergency pause (admin only).
     pub fn set_emergency_pause(
         env: Env,
         admin: Address,
@@ -725,30 +582,19 @@ impl HelloContract {
         risk_management::set_emergency_pause(&env, admin, paused)
     }
 
-    /// Get user analytics metrics
-    pub fn get_user_analytics(
-        env: Env,
-        user: Address,
-    ) -> Result<crate::analytics::UserMetrics, crate::analytics::AnalyticsError> {
-        analytics::get_user_activity_summary(&env, &user)
-    }
+    // ============================================================================
+    // AMM Methods
+    // ============================================================================
 
-    /// Get protocol analytics metrics
-    pub fn get_protocol_analytics(
-        env: Env,
-    ) -> Result<crate::analytics::ProtocolMetrics, crate::analytics::AnalyticsError> {
-        analytics::get_protocol_stats(&env)
-    }
-
-    /// Initialize AMM settings (admin only)
+    /// Initialize AMM settings (admin only).
     pub fn initialize_amm(
         env: Env,
         admin: Address,
         default_slippage: i128,
         max_slippage: i128,
         auto_swap_threshold: i128,
-    ) -> Result<(), AmmError> {
-        initialize_amm(
+    ) -> Result<(), amm::AmmError> {
+        amm::initialize_amm(
             env,
             admin,
             default_slippage,
@@ -757,27 +603,29 @@ impl HelloContract {
         )
     }
 
-    /// Set AMM pool configuration (admin only)
+    /// Set AMM pool configuration (admin only).
     pub fn set_amm_pool(
         env: Env,
         admin: Address,
-        protocol_config: AmmProtocolConfig,
-    ) -> Result<(), AmmError> {
-        set_amm_pool(env, admin, protocol_config)
+        protocol_config: amm::AmmProtocolConfig,
+    ) -> Result<(), amm::AmmError> {
+        amm::set_amm_pool(env, admin, protocol_config)
     }
 
-    /// Execute swap through AMM
-    pub fn amm_swap(env: Env, user: Address, params: SwapParams) -> Result<i128, AmmError> {
-        amm_swap(env, user, params)
+    /// Execute swap through AMM.
+    pub fn amm_swap(
+        env: Env,
+        user: Address,
+        params: amm::SwapParams,
+    ) -> Result<i128, amm::AmmError> {
+        amm::amm_swap(env, user, params)
     }
 
-    /// Register a bridge
-    ///
-    /// # Arguments
-    /// * `caller` - Admin address for authorization
-    /// * `network_id` - ID of the remote network
-    /// * `bridge` - Address of the bridge contract
-    /// * `fee_bps` - Fee in basis points
+    // ============================================================================
+    // Bridge Methods
+    // ============================================================================
+
+    /// Register a bridge (admin only).
     pub fn register_bridge(
         env: Env,
         caller: Address,
@@ -788,12 +636,7 @@ impl HelloContract {
         bridge::register_bridge(&env, caller, network_id, bridge, fee_bps)
     }
 
-    /// Set bridge fee
-    ///
-    /// # Arguments
-    /// * `caller` - Admin address for authorization
-    /// * `network_id` - ID of the remote network
-    /// * `fee_bps` - New fee in basis points
+    /// Set bridge fee (admin only).
     pub fn set_bridge_fee(
         env: Env,
         caller: Address,
@@ -803,13 +646,7 @@ impl HelloContract {
         bridge::set_bridge_fee(&env, caller, network_id, fee_bps)
     }
 
-    /// Deposit through a bridge
-    ///
-    /// # Arguments
-    /// * `user` - User depositing collateral
-    /// * `network_id` - Remote network ID
-    /// * `asset` - Asset to deposit
-    /// * `amount` - Amount to deposit
+    /// Deposit through a bridge.
     pub fn bridge_deposit(
         env: Env,
         user: Address,
@@ -820,13 +657,7 @@ impl HelloContract {
         bridge::bridge_deposit(&env, user, network_id, asset, amount)
     }
 
-    /// Withdraw through a bridge
-    ///
-    /// # Arguments
-    /// * `user` - User withdrawing collateral
-    /// * `network_id` - Remote network ID
-    /// * `asset` - Asset to withdraw
-    /// * `amount` - Amount to withdraw
+    /// Withdraw through a bridge.
     pub fn bridge_withdraw(
         env: Env,
         user: Address,
@@ -837,25 +668,21 @@ impl HelloContract {
         bridge::bridge_withdraw(&env, user, network_id, asset, amount)
     }
 
-    /// List all bridges
+    /// List all bridges.
     pub fn list_bridges(env: Env) -> Map<u32, BridgeConfig> {
         bridge::list_bridges(&env)
     }
 
-    /// Get configuration of a specific bridge
+    /// Get configuration of a specific bridge.
     pub fn get_bridge_config(env: Env, network_id: u32) -> Result<BridgeConfig, BridgeError> {
         bridge::get_bridge_config(&env, network_id)
     }
 
-    /// Set a configuration value (admin only)
-    ///
-    /// # Arguments
-    /// * `caller` - The caller address (must be admin)
-    /// * `key` - The configuration key
-    /// * `value` - The configuration value
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    // ============================================================================
+    // Config Methods
+    // ============================================================================
+
+    /// Set a configuration value (admin only).
     pub fn config_set(
         env: Env,
         caller: Address,
@@ -865,25 +692,12 @@ impl HelloContract {
         config_set(&env, caller, key, value)
     }
 
-    /// Get a configuration value
-    ///
-    /// # Arguments
-    /// * `key` - The configuration key
-    ///
-    /// # Returns
-    /// Returns Some(value) if the key exists, None otherwise
+    /// Get a configuration value.
     pub fn config_get(env: Env, key: soroban_sdk::Symbol) -> Option<soroban_sdk::Val> {
         config_get(&env, key)
     }
 
-    /// Backup configuration parameters (admin only)
-    ///
-    /// # Arguments
-    /// * `caller` - The caller address (must be admin)
-    /// * `keys` - A vector of configuration keys to backup
-    ///
-    /// # Returns
-    /// Returns a vector of key-value pairs representing the backup
+    /// Backup configuration parameters (admin only).
     pub fn config_backup(
         env: Env,
         caller: Address,
@@ -892,14 +706,7 @@ impl HelloContract {
         config_backup(&env, caller, keys)
     }
 
-    /// Restore configuration parameters (admin only)
-    ///
-    /// # Arguments
-    /// * `caller` - The caller address (must be admin)
-    /// * `backup` - A vector of key-value pairs to restore
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Restore configuration parameters (admin only).
     pub fn config_restore(
         env: Env,
         caller: Address,
@@ -909,34 +716,15 @@ impl HelloContract {
     }
 
     // ============================================================================
-    // Cross-Asset / Asset Configuration Methods
+    // Cross-Asset Methods
     // ============================================================================
 
-    /// Initialize cross-asset lending module (admin only)
-    ///
-    /// Sets up the cross-asset lending system with an admin.
-    /// Must be called before any asset configuration.
-    ///
-    /// # Arguments
-    /// * `admin` - The admin address
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Initialize cross-asset lending module (admin only).
     pub fn initialize_ca(env: Env, admin: Address) -> Result<(), CrossAssetError> {
-        initialize(&env, admin)
+        cross_asset::initialize(&env, admin)
     }
 
-    /// Initialize/register a new asset with configuration
-    ///
-    /// Registers an asset with its collateral factor (LTV), liquidation threshold,
-    /// debt ceiling, and other parameters. Admin only.
-    ///
-    /// # Arguments
-    /// * `asset` - Asset address (None for native XLM)
-    /// * `config` - Complete asset configuration
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Initialize/register a new asset with configuration.
     pub fn initialize_asset(
         env: Env,
         asset: Option<Address>,
@@ -945,22 +733,7 @@ impl HelloContract {
         initialize_asset(&env, asset, config)
     }
 
-    /// Update asset configuration (admin only)
-    ///
-    /// Updates asset parameters including LTV, liquidation threshold, debt ceiling,
-    /// and collateral/borrow enablement. Only provided fields are updated.
-    ///
-    /// # Arguments
-    /// * `asset` - Asset address (None for XLM)
-    /// * `collateral_factor` - Optional new LTV in basis points
-    /// * `liquidation_threshold` - Optional new liquidation threshold in basis points
-    /// * `max_supply` - Optional new supply cap
-    /// * `max_borrow` - Optional new debt ceiling
-    /// * `can_collateralize` - Optional flag to enable/disable as collateral
-    /// * `can_borrow` - Optional flag to enable/disable borrowing
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Update asset configuration (admin only).
     #[allow(clippy::too_many_arguments)]
     pub fn update_asset_config(
         env: Env,
@@ -984,16 +757,7 @@ impl HelloContract {
         )
     }
 
-    /// Update asset price (admin/oracle only)
-    ///
-    /// Updates the price for an asset used in health factor calculations.
-    ///
-    /// # Arguments
-    /// * `asset` - Asset address (None for XLM)
-    /// * `price` - New price in base units (7 decimals)
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Update asset price (admin/oracle only).
     pub fn update_asset_price(
         env: Env,
         asset: Option<Address>,
@@ -1002,16 +766,7 @@ impl HelloContract {
         update_asset_price(&env, asset, price)
     }
 
-    /// Get asset configuration
-    ///
-    /// Returns the configuration for a specific asset including LTV,
-    /// liquidation threshold, debt ceiling, etc.
-    ///
-    /// # Arguments
-    /// * `asset` - Asset address (None for XLM)
-    ///
-    /// # Returns
-    /// Asset configuration
+    /// Get asset configuration.
     pub fn get_asset_config(
         env: Env,
         asset: Option<Address>,
@@ -1019,107 +774,52 @@ impl HelloContract {
         get_asset_config_by_address(&env, asset)
     }
 
-    /// Get list of all configured assets
-    ///
-    /// Returns all assets that have been registered in the system.
-    ///
-    /// # Returns
-    /// Vector of asset keys
+    /// Get list of all configured assets.
     pub fn get_asset_list(env: Env) -> soroban_sdk::Vec<AssetKey> {
         get_asset_list(&env)
     }
 
-    /// Deposit collateral for cross-asset lending
-    ///
-    /// Deposits collateral that can be used across multiple assets.
-    /// Asset must be enabled for collateral.
-    ///
-    /// # Arguments
-    /// * `user` - User address
-    /// * `asset` - Asset address (None for XLM)
-    /// * `amount` - Amount to deposit
-    ///
-    /// # Returns
-    /// Updated asset position
+    /// Deposit collateral for cross-asset lending.
     pub fn cross_asset_deposit(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<AssetPosition, CrossAssetError> {
-        cross_asset_deposit(&env, user, asset, amount)
+        cross_asset::cross_asset_deposit(&env, user, asset, amount)
     }
 
-    /// Withdraw collateral from cross-asset lending
-    ///
-    /// Withdraws collateral while maintaining healthy position.
-    ///
-    /// # Arguments
-    /// * `user` - User address
-    /// * `asset` - Asset address (None for XLM)
-    /// * `amount` - Amount to withdraw
-    ///
-    /// # Returns
-    /// Updated asset position
+    /// Withdraw collateral from cross-asset lending.
     pub fn cross_asset_withdraw(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<AssetPosition, CrossAssetError> {
-        cross_asset_withdraw(&env, user, asset, amount)
+        cross_asset::cross_asset_withdraw(&env, user, asset, amount)
     }
 
-    /// Borrow asset in cross-asset lending
-    ///
-    /// Borrows against cross-asset collateral. Respects LTV and debt ceiling.
-    ///
-    /// # Arguments
-    /// * `user` - User address
-    /// * `asset` - Asset address (None for XLM)
-    /// * `amount` - Amount to borrow
-    ///
-    /// # Returns
-    /// Updated asset position
+    /// Borrow asset in cross-asset lending.
     pub fn cross_asset_borrow(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<AssetPosition, CrossAssetError> {
-        cross_asset_borrow(&env, user, asset, amount)
+        cross_asset::cross_asset_borrow(&env, user, asset, amount)
     }
 
-    /// Repay borrowed asset
-    ///
-    /// Repays debt for a specific asset.
-    ///
-    /// # Arguments
-    /// * `user` - User address
-    /// * `asset` - Asset address (None for XLM)
-    /// * `amount` - Amount to repay
-    ///
-    /// # Returns
-    /// Updated asset position
+    /// Repay borrowed asset in cross-asset lending.
     pub fn cross_asset_repay(
         env: Env,
         user: Address,
         asset: Option<Address>,
         amount: i128,
     ) -> Result<AssetPosition, CrossAssetError> {
-        cross_asset_repay(&env, user, asset, amount)
+        cross_asset::cross_asset_repay(&env, user, asset, amount)
     }
 
-    /// Get user's position for a specific asset
-    ///
-    /// Returns collateral and debt for a user in a specific asset.
-    ///
-    /// # Arguments
-    /// * `user` - User address
-    /// * `asset` - Asset address (None for XLM)
-    ///
-    /// # Returns
-    /// Asset position
+    /// Get user's position for a specific asset.
     pub fn get_user_asset_position(
         env: Env,
         user: Address,
@@ -1128,16 +828,7 @@ impl HelloContract {
         get_user_asset_position(&env, &user, asset)
     }
 
-    /// Get user's unified position summary across all assets
-    ///
-    /// Calculates health factor, liquidation status, and borrow capacity
-    /// across all assets.
-    ///
-    /// # Arguments
-    /// * `user` - User address
-    ///
-    /// # Returns
-    /// Position summary with health factor
+    /// Get user's unified position summary across all assets.
     pub fn get_user_position_summary(
         env: Env,
         user: Address,
@@ -1149,23 +840,7 @@ impl HelloContract {
     // Governance Entrypoints
     // ============================================================================
 
-    /// Initialize governance module
-    ///
-    /// Sets up the governance system with voting token and parameters.
-    /// Must be called after contract initialization.
-    ///
-    /// # Arguments
-    /// * `admin` - The admin address
-    /// * `vote_token` - Token contract address used for voting
-    /// * `voting_period` - Optional voting duration in seconds
-    /// * `execution_delay` - Optional delay before execution in seconds
-    /// * `quorum_bps` - Optional quorum requirement in basis points
-    /// * `proposal_threshold` - Optional minimum tokens to create proposal
-    /// * `timelock_duration` - Optional timelock duration in seconds
-    /// * `default_voting_threshold` - Optional default voting threshold in basis points
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Initialize governance module.
     pub fn gov_initialize(
         env: Env,
         admin: Address,
@@ -1190,35 +865,18 @@ impl HelloContract {
         )
     }
 
-    /// Create a new governance proposal
-    ///
-    /// # Arguments
-    /// * `proposer` - Address creating the proposal
-    /// * `proposal_type` - Type of proposal (parameter change, pause, etc.)
-    /// * `description` - Description of the proposal
-    /// * `voting_threshold` - Optional custom voting threshold
-    ///
-    /// # Returns
-    /// Returns the new proposal ID
+    /// Create a new governance proposal.
     pub fn gov_create_proposal(
         env: Env,
         proposer: Address,
         proposal_type: ProposalType,
-        description: String,
+        description: soroban_sdk::String,
         voting_threshold: Option<i128>,
     ) -> Result<u64, errors::GovernanceError> {
         governance::create_proposal(&env, proposer, proposal_type, description, voting_threshold)
     }
 
-    /// Cast a vote on a proposal
-    ///
-    /// # Arguments
-    /// * `voter` - Address casting the vote
-    /// * `proposal_id` - ID of the proposal to vote on
-    /// * `vote_type` - Vote choice (For, Against, Abstain)
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Cast a vote on a proposal.
     pub fn gov_vote(
         env: Env,
         voter: Address,
@@ -1228,14 +886,7 @@ impl HelloContract {
         governance::vote(&env, voter, proposal_id, vote_type)
     }
 
-    /// Queue a successful proposal for execution
-    ///
-    /// # Arguments
-    /// * `caller` - Address queuing the proposal
-    /// * `proposal_id` - ID of the proposal to queue
-    ///
-    /// # Returns
-    /// Returns the proposal outcome
+    /// Queue a successful proposal for execution.
     pub fn gov_queue_proposal(
         env: Env,
         caller: Address,
@@ -1244,14 +895,7 @@ impl HelloContract {
         governance::queue_proposal(&env, caller, proposal_id)
     }
 
-    /// Execute a queued proposal
-    ///
-    /// # Arguments
-    /// * `executor` - Address executing the proposal
-    /// * `proposal_id` - ID of the proposal to execute
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Execute a queued proposal.
     pub fn gov_execute_proposal(
         env: Env,
         executor: Address,
@@ -1260,16 +904,7 @@ impl HelloContract {
         governance::execute_proposal(&env, executor, proposal_id)
     }
 
-    /// Cancel a proposal
-    ///
-    /// Only proposer or admin can cancel.
-    ///
-    /// # Arguments
-    /// * `caller` - Address cancelling the proposal
-    /// * `proposal_id` - ID of the proposal to cancel
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Cancel a proposal.
     pub fn gov_cancel_proposal(
         env: Env,
         caller: Address,
@@ -1278,14 +913,7 @@ impl HelloContract {
         governance::cancel_proposal(&env, caller, proposal_id)
     }
 
-    /// Approve a proposal as multisig admin
-    ///
-    /// # Arguments
-    /// * `approver` - Admin address approving the proposal
-    /// * `proposal_id` - ID of the proposal to approve
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Approve a proposal as multisig admin.
     pub fn gov_approve_proposal(
         env: Env,
         approver: Address,
@@ -1294,15 +922,7 @@ impl HelloContract {
         governance::approve_proposal(&env, approver, proposal_id)
     }
 
-    /// Set multisig configuration
-    ///
-    /// # Arguments
-    /// * `caller` - Caller address (must be admin)
-    /// * `admins` - Vector of admin addresses
-    /// * `threshold` - Number of approvals required
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Set multisig configuration.
     pub fn gov_set_multisig_config(
         env: Env,
         caller: Address,
@@ -1312,14 +932,7 @@ impl HelloContract {
         governance::set_multisig_config(&env, caller, admins, threshold)
     }
 
-    /// Add a guardian
-    ///
-    /// # Arguments
-    /// * `caller` - Caller address (must be admin)
-    /// * `guardian` - Guardian address to add
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Add a guardian.
     pub fn gov_add_guardian(
         env: Env,
         caller: Address,
@@ -1328,14 +941,7 @@ impl HelloContract {
         governance::add_guardian(&env, caller, guardian)
     }
 
-    /// Remove a guardian
-    ///
-    /// # Arguments
-    /// * `caller` - Caller address (must be admin)
-    /// * `guardian` - Guardian address to remove
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Remove a guardian.
     pub fn gov_remove_guardian(
         env: Env,
         caller: Address,
@@ -1344,14 +950,7 @@ impl HelloContract {
         governance::remove_guardian(&env, caller, guardian)
     }
 
-    /// Set guardian threshold
-    ///
-    /// # Arguments
-    /// * `caller` - Caller address (must be admin)
-    /// * `threshold` - Number of guardian approvals required for recovery
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Set guardian threshold.
     pub fn gov_set_guardian_threshold(
         env: Env,
         caller: Address,
@@ -1360,15 +959,7 @@ impl HelloContract {
         governance::set_guardian_threshold(&env, caller, threshold)
     }
 
-    /// Start recovery process
-    ///
-    /// # Arguments
-    /// * `initiator` - Guardian initiating recovery
-    /// * `old_admin` - Current admin to replace
-    /// * `new_admin` - New admin address
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Start recovery process.
     pub fn gov_start_recovery(
         env: Env,
         initiator: Address,
@@ -1378,13 +969,7 @@ impl HelloContract {
         governance::start_recovery(&env, initiator, old_admin, new_admin)
     }
 
-    /// Approve recovery
-    ///
-    /// # Arguments
-    /// * `approver` - Guardian approving recovery
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Approve recovery.
     pub fn gov_approve_recovery(
         env: Env,
         approver: Address,
@@ -1392,18 +977,12 @@ impl HelloContract {
         governance::approve_recovery(&env, approver)
     }
 
-    /// Execute recovery
-    ///
-    /// # Arguments
-    /// * `executor` - Address executing recovery
-    ///
-    /// # Returns
-    /// Returns Ok(()) on success
+    /// Execute recovery.
     pub fn gov_execute_recovery(
         env: Env,
-        user: Address,
-    ) -> Result<UserPositionSummary, CrossAssetError> {
-        get_user_position_summary(&env, &user)
+        executor: Address,
+    ) -> Result<(), errors::GovernanceError> {
+        governance::execute_recovery(&env, executor)
     }
 
     // ============================================================================
@@ -1543,60 +1122,65 @@ impl HelloContract {
 
     // ============================================================================
 
-    /// Get proposal by ID
+    /// Get proposal by ID.
     pub fn gov_get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
         governance::get_proposal(&env, proposal_id)
     }
 
-    /// Get vote information
+    /// Get vote information.
     pub fn gov_get_vote(env: Env, proposal_id: u64, voter: Address) -> Option<VoteInfo> {
         governance::get_vote(&env, proposal_id, voter)
     }
 
-    /// Get governance configuration
+    /// Get governance configuration.
     pub fn gov_get_config(env: Env) -> Option<GovernanceConfig> {
         governance::get_config(&env)
     }
 
-    /// Get governance admin
+    /// Get governance admin.
     pub fn gov_get_admin(env: Env) -> Option<Address> {
         governance::get_admin(&env)
     }
 
-    /// Get multisig configuration
+    /// Get multisig configuration.
     pub fn gov_get_multisig_config(env: Env) -> Option<MultisigConfig> {
         governance::get_multisig_config(&env)
     }
 
-    /// Get guardian configuration
+    /// Get guardian configuration.
     pub fn gov_get_guardian_config(env: Env) -> Option<GuardianConfig> {
         governance::get_guardian_config(&env)
     }
 
-    /// Get proposal approvals
+    /// Get proposal approvals.
     pub fn gov_get_proposal_approvals(env: Env, proposal_id: u64) -> Option<Vec<Address>> {
         governance::get_proposal_approvals(&env, proposal_id)
     }
 
-    /// Get current recovery request
+    /// Get current recovery request.
     pub fn gov_get_recovery_request(env: Env) -> Option<RecoveryRequest> {
         governance::get_recovery_request(&env)
     }
 
-    /// Get recovery approvals
+    /// Get recovery approvals.
     pub fn gov_get_recovery_approvals(env: Env) -> Option<Vec<Address>> {
         governance::get_recovery_approvals(&env)
     }
 
-    /// Get paginated list of proposals
+    /// Get paginated list of proposals.
     pub fn gov_get_proposals(env: Env, start_id: u64, limit: u32) -> Vec<Proposal> {
         governance::get_proposals(&env, start_id, limit)
     }
 
-    /// Check if an address can vote on a proposal
+    /// Check if an address can vote on a proposal.
     pub fn gov_can_vote(env: Env, voter: Address, proposal_id: u64) -> bool {
         governance::can_vote(&env, voter, proposal_id)
     }
+}
+
+#[cfg(test)]
+mod tests;
+
 
     // --- Bridge ---
 
@@ -1664,3 +1248,9 @@ mod test_zero_amount;
 
 #[cfg(test)]
 mod flash_loan_test;
+
+#[cfg(test)]
+mod governance_test;
+
+#[cfg(test)]
+mod monitor_test;

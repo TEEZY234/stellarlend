@@ -66,6 +66,7 @@ mod data_store_test;
 #[cfg(test)]
 mod math_safety_test;
 #[cfg(test)]
+mod upgrade_migration_safety_test;
 mod race_tests;
 #[cfg(test)]
 mod upgrade_test;
@@ -460,6 +461,67 @@ impl LendingContract {
     pub fn current_version(env: Env) -> u32 {
         upgrade::UpgradeManager::current_version(env)
     }
+
+    // ───────────────────────────────────────────────────
+    // Data Store Management
+    // ───────────────────────────────────────────────────
+
+    pub fn data_store_init(env: Env, admin: Address) {
+        data_store::DataStore::init(env, admin);
+    }
+
+    pub fn data_grant_writer(env: Env, caller: Address, writer: Address) {
+        data_store::DataStore::grant_writer(env, caller, writer);
+    }
+
+    pub fn data_revoke_writer(env: Env, caller: Address, writer: Address) {
+        data_store::DataStore::revoke_writer(env, caller, writer);
+    }
+
+    pub fn data_save(env: Env, caller: Address, key: soroban_sdk::String, value: Bytes) {
+        data_store::DataStore::data_save(env, caller, key, value);
+    }
+
+    pub fn data_load(env: Env, key: soroban_sdk::String) -> Bytes {
+        data_store::DataStore::data_load(env, key)
+    }
+
+    pub fn data_backup(env: Env, caller: Address, backup_name: soroban_sdk::String) {
+        data_store::DataStore::data_backup(env, caller, backup_name);
+    }
+
+    pub fn data_restore(env: Env, caller: Address, backup_name: soroban_sdk::String) {
+        data_store::DataStore::data_restore(env, caller, backup_name);
+    }
+
+    pub fn data_migrate_bump_version(
+        env: Env,
+        caller: Address,
+        new_version: u32,
+        memo: soroban_sdk::String,
+    ) {
+        data_store::DataStore::data_migrate_bump_version(env, caller, new_version, memo);
+    }
+
+    pub fn data_schema_version(env: Env) -> u32 {
+        data_store::DataStore::schema_version(env)
+    }
+
+    pub fn data_entry_count(env: Env) -> u32 {
+        data_store::DataStore::entry_count(env)
+    }
+
+    pub fn data_key_exists(env: Env, key: soroban_sdk::String) -> bool {
+        data_store::DataStore::key_exists(env, key)
+    }
+
+    /// Initialize borrow settings (admin only)
+    pub fn initialize_borrow_settings(
+        env: Env,
+        debt_ceiling: i128,
+        min_borrow_amount: i128,
+    ) -> Result<(), BorrowError> {
+        initialize_borrow_logic(&env, debt_ceiling, min_borrow_amount)
 }
 
 fn ensure_admin(env: &Env, admin: &Address) -> Result<(), BorrowError> {

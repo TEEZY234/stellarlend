@@ -54,6 +54,26 @@ jobs:
           cd stellar-lend
           cargo test --verbose
 
+      - name: Run cross-contract tests and generate report
+        run: |
+          cd stellar-lend
+          cargo test --package hello-world --lib cross_contract_test --verbose -- --nocapture > cross_contract_test_report.txt
+          cat cross_contract_test_report.txt
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-contract-test-report
+          path: stellar-lend/cross_contract_test_report.txt
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate code coverage
+        run: |
+          cd stellar-lend
+          cargo tarpaulin --verbose --out Xml --fail-under 90
+
       - name: Install cargo-audit
         run: cargo install cargo-audit
 

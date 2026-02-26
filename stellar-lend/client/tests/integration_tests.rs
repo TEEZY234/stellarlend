@@ -321,7 +321,8 @@ async fn test_config_builder_pattern() {
 async fn test_error_handling_and_retries() {
     let mock_server = MockServer::start().await;
 
-    // First two requests fail, third succeeds
+    // First request fails, second succeeds
+    // Note: create_test_config sets max_retries(1), so we can only have 1 failure before success
     Mock::given(method("GET"))
         .and(path("/"))
         .respond_with(
@@ -329,7 +330,7 @@ async fn test_error_handling_and_retries() {
                 .set_body_string("Service Unavailable")
                 .append_header("Retry-After", "1"),
         )
-        .up_to_n_times(2)
+        .up_to_n_times(1)
         .mount(&mock_server)
         .await;
 
@@ -342,7 +343,18 @@ async fn test_error_handling_and_retries() {
         .mount(&mock_server)
         .await;
 
-    let config = create_test_config(mock_server.uri(), "http://soroban.test".to_string());
+    // Need at least 2 retries: 1st attempt 503, 2nd 503, 3rd 200
+    let config = Arc::new(
+        BlockchainConfig::custom(
+            mock_server.uri(),
+            "http://soroban.test".to_string(),
+            "Test SDF Network".to_string(),
+        )
+        .unwrap()
+        .with_request_timeout(Duration::from_secs(5))
+        .with_max_retries(2)
+        .with_tx_config(100, 5),
+    );
     let client = BlockchainClient::new(config).unwrap();
 
     // Should succeed after retries

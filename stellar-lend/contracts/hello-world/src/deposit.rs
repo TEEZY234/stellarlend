@@ -1,7 +1,34 @@
+//! # Deposit Module
+//!
+//! Handles collateral deposit operations for the lending protocol.
+//!
+//! This module manages:
+//! - Depositing assets (both token contracts and native XLM) as collateral
+//! - Tracking user collateral balances and positions
+//! - Updating user and protocol analytics on each deposit
+//! - Emitting events for off-chain indexing
+//!
+//! ## Storage Layout
+//! - `CollateralBalance(user)` — per-user collateral amount
+//! - `Position(user)` — per-user position (collateral, debt, interest)
+//! - `AssetParams(asset)` — per-asset deposit parameters
+//! - `PauseSwitches` — operation pause flags
+//! - `ProtocolAnalytics` — aggregate protocol metrics
+//! - `UserAnalytics(user)` — per-user activity metrics
+//! - `ActivityLog` — bounded activity history (max 1000 entries)
+//!
+//! ## Invariants
+//! - Deposit amount must be strictly positive.
+//! - Deposits are rejected when the protocol or deposit operation is paused.
+//! - Token transfers use `transfer_from`, requiring prior user approval.
+
 #![allow(unused)]
 use soroban_sdk::{contracterror, contracttype, Address, Env, IntoVal, Map, Symbol, Val, Vec};
 
-use crate::events::{log_deposit, DepositEvent};
+use crate::events::{
+    emit_analytics_updated, emit_deposit, emit_position_updated, emit_user_activity_tracked,
+    AnalyticsUpdatedEvent, DepositEvent, PositionUpdatedEvent, UserActivityTrackedEvent,
+};
 
 /// Errors that can occur during deposit operations
 #[contracterror]
@@ -29,22 +56,32 @@ pub enum DepositError {
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub enum DepositDataKey {
-    /// User collateral balances: Map<Address, I128>
+    /// User collateral balance (legacy)
+    /// Value type: i128
     CollateralBalance(Address),
-    /// Asset parameters: Map<Address, AssetParams>
+    /// Asset-specific parameters (legacy)
+    /// Value type: AssetParams
     AssetParams(Address),
-    /// Pause switches: Map<Symbol, bool>
+    /// Legacy operation pause switches: Map<Symbol, bool>
     PauseSwitches,
-    /// Admin address
+    /// Protocol admin address
+    /// Value type: Address
     Admin,
-    /// User positions: Map<Address, Position>
+    /// User's unified position tracking
+    /// Value type: Position
     Position(Address),
-    /// Protocol analytics
+    /// Global protocol analytics (TVL, aggregate borrows/deposits)
+    /// Value type: ProtocolAnalytics
     ProtocolAnalytics,
-    /// User analytics: Map<Address, UserAnalytics>
+    /// Granular per-user analytics metrics
+    /// Value type: UserAnalytics
     UserAnalytics(Address),
-    /// Activity log: Vec<Activity>
+    /// Bounded log of recent deposit activities: Vec<Activity>
     ActivityLog,
+    /// Protocol reserve per asset: Map<Option<Address>, i128>
+    ProtocolReserve(Option<Address>),
+    /// Native asset (XLM) contract address
+    NativeAssetAddress,
 }
 
 /// Asset parameters for collateral
@@ -57,6 +94,8 @@ pub struct AssetParams {
     pub collateral_factor: i128,
     /// Maximum deposit amount
     pub max_deposit: i128,
+    /// Borrow fee in basis points (e.g., 50 = 0.5%)
+    pub borrow_fee_bps: i128,
 }
 
 /// User position tracking
@@ -174,6 +213,9 @@ pub fn deposit_collateral(
     if amount <= 0 {
         return Err(DepositError::InvalidAmount);
     }
+
+    // Check for reentrancy
+    let _guard = crate::reentrancy::ReentrancyGuard::new(env).map_err(|_| DepositError::Reentrancy)?;
 
     // Check if deposits are paused
     // Note: The risk management system provides pause functionality through the public API.
@@ -302,7 +344,7 @@ pub fn deposit_collateral(
     )?;
 
     // Emit deposit event
-    log_deposit(
+    emit_deposit(
         env,
         DepositEvent {
             user: user.clone(),
@@ -322,6 +364,27 @@ pub fn deposit_collateral(
     emit_user_activity_tracked_event(env, &user, Symbol::new(env, "deposit"), amount, timestamp);
 
     Ok(new_collateral)
+}
+
+/// Set the native asset address (admin only).
+/// Required for deposit/borrow/repay with asset = None. Must be called before using None as asset.
+pub fn set_native_asset_address(
+    env: &Env,
+    caller: Address,
+    native_asset: Address,
+) -> Result<(), DepositError> {
+    let admin = crate::admin::get_admin(env).ok_or(DepositError::InvalidAsset)?;
+    if caller != admin {
+        return Err(DepositError::InvalidAsset);
+    }
+    caller.require_auth();
+    if native_asset == env.current_contract_address() {
+        return Err(DepositError::InvalidAsset);
+    }
+    env.storage()
+        .persistent()
+        .set(&DepositDataKey::NativeAssetAddress, &native_asset);
+    Ok(())
 }
 
 /// Update user analytics after deposit
@@ -442,16 +505,14 @@ pub fn add_activity_log(
 
 /// Emit position updated event
 pub fn emit_position_updated_event(env: &Env, user: &Address, position: &Position) {
-    let topics = (Symbol::new(env, "position_updated"), user.clone());
-    let mut data: Vec<Val> = Vec::new(env);
-    data.push_back(Symbol::new(env, "user").into_val(env));
-    data.push_back(user.clone().into_val(env));
-    data.push_back(Symbol::new(env, "collateral").into_val(env));
-    data.push_back(position.collateral.into_val(env));
-    data.push_back(Symbol::new(env, "debt").into_val(env));
-    data.push_back(position.debt.into_val(env));
-
-    env.events().publish(topics, data);
+    emit_position_updated(
+        env,
+        PositionUpdatedEvent {
+            user: user.clone(),
+            collateral: position.collateral,
+            debt: position.debt,
+        },
+    );
 }
 
 /// Emit analytics updated event
@@ -462,19 +523,16 @@ pub fn emit_analytics_updated_event(
     amount: i128,
     timestamp: u64,
 ) {
-    use soroban_sdk::{String, Val};
-    let topics = (Symbol::new(env, "analytics_updated"), user.clone());
-    let mut data: Vec<Val> = Vec::new(env);
-    data.push_back(Symbol::new(env, "user").into_val(env));
-    data.push_back(user.clone().into_val(env));
-    data.push_back(Symbol::new(env, "activity_type").into_val(env));
-    data.push_back(String::from_str(env, activity_type).into_val(env));
-    data.push_back(Symbol::new(env, "amount").into_val(env));
-    data.push_back(amount.into_val(env));
-    data.push_back(Symbol::new(env, "timestamp").into_val(env));
-    data.push_back(timestamp.into_val(env));
-
-    env.events().publish(topics, data);
+    use soroban_sdk::String;
+    emit_analytics_updated(
+        env,
+        AnalyticsUpdatedEvent {
+            user: user.clone(),
+            activity_type: String::from_str(env, activity_type),
+            amount,
+            timestamp,
+        },
+    );
 }
 
 /// Emit user activity tracked event
@@ -485,19 +543,21 @@ pub fn emit_user_activity_tracked_event(
     amount: i128,
     timestamp: u64,
 ) {
-    use soroban_sdk::Val;
-    let topics = (Symbol::new(env, "user_activity_tracked"), user.clone());
-    let mut data: Vec<Val> = Vec::new(env);
-    data.push_back(Symbol::new(env, "user").into_val(env));
-    data.push_back(user.clone().into_val(env));
-    data.push_back(Symbol::new(env, "operation").into_val(env));
-    data.push_back(operation.into_val(env));
-    data.push_back(Symbol::new(env, "amount").into_val(env));
-    data.push_back(amount.into_val(env));
-    data.push_back(Symbol::new(env, "timestamp").into_val(env));
-    data.push_back(timestamp.into_val(env));
+    emit_user_activity_tracked(
+        env,
+        UserActivityTrackedEvent {
+            user: user.clone(),
+            operation,
+            amount,
+            timestamp,
+        },
+    );
+}
 
-    env.events().publish(topics, data);
+#[contracttype]
+enum RiskDataKey {
+    RiskConfig,
+    EmergencyPause,
 }
 
 /// Check risk management pause status
@@ -505,11 +565,6 @@ pub fn emit_user_activity_tracked_event(
 /// by accessing the storage directly to avoid module dependency issues
 fn check_risk_management_pause(env: &Env) -> Result<(), DepositError> {
     // Define risk management storage keys locally to avoid dependency
-    #[contracttype]
-    enum RiskDataKey {
-        RiskConfig,
-        EmergencyPause,
-    }
 
     // Check emergency pause first
     let emergency_key = RiskDataKey::EmergencyPause;

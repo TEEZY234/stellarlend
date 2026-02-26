@@ -1,8 +1,30 @@
+//! # Interest Rate Module
+//!
+//! Implements a kink-based (piecewise linear) interest rate model for the lending protocol.
+//!
+//! ## Rate Model
+//! The borrow rate is determined by protocol utilization (borrows / deposits):
+//! - **Below kink** (default 80%): `rate = base_rate + (utilization / kink) * multiplier`
+//! - **Above kink**: `rate = base_rate + multiplier + ((util - kink) / (1 - kink)) * jump_multiplier`
+//!
+//! The supply rate is derived as: `supply_rate = borrow_rate - spread`
+//!
+//! ## Configuration (defaults)
+//! - Base rate: 1% APY
+//! - Kink utilization: 80%
+//! - Multiplier: 20% (slope below kink)
+//! - Jump multiplier: 100% (slope above kink)
+//! - Rate floor: 0.5%, Rate ceiling: 100%
+//! - Spread: 2%
+//!
+//! ## Emergency Adjustment
+//! Admin can apply a positive or negative emergency adjustment to the calculated rate,
+//! bounded to ±100%.
+
 #![allow(unused)]
 use soroban_sdk::{contracterror, contracttype, Address, Env, IntoVal};
 
 use crate::deposit::{DepositDataKey, ProtocolAnalytics};
-use crate::risk_management::get_admin;
 
 /// Errors that can occur during interest rate operations
 #[contracterror]
@@ -19,6 +41,8 @@ pub enum InterestRateError {
     Overflow = 4,
     /// Division by zero (e.g., no deposits)
     DivisionByZero = 5,
+    /// Contract has already been initialized
+    AlreadyInitialized = 6,
 }
 
 /// Storage keys for interest rate data
@@ -26,11 +50,13 @@ pub enum InterestRateError {
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub enum InterestRateDataKey {
-    /// Interest rate configuration
+    /// Kink-based interest rate model parameters
+    /// Value type: InterestRateConfig
     InterestRateConfig,
-    /// Admin address
+    /// Module admin address authorized for rate adjustments
+    /// Value type: Address
     Admin,
-    /// Emergency rate adjustment flag
+    /// Placeholder for emergency rate adjustment status
     EmergencyRateAdjustment,
 }
 
@@ -95,21 +121,17 @@ pub fn get_interest_rate_config(env: &Env) -> Option<InterestRateConfig> {
 pub fn initialize_interest_rate_config(env: &Env, admin: Address) -> Result<(), InterestRateError> {
     let config_key = InterestRateDataKey::InterestRateConfig;
 
-    // Check if already initialized
+    // Guard against double initialization
     if env
         .storage()
         .persistent()
         .has::<InterestRateDataKey>(&config_key)
     {
-        return Ok(()); // Already initialized
+        return Err(InterestRateError::AlreadyInitialized);
     }
 
     let config = get_default_config();
     env.storage().persistent().set(&config_key, &config);
-
-    // Store admin
-    let admin_key = InterestRateDataKey::Admin;
-    env.storage().persistent().set(&admin_key, &admin);
 
     Ok(())
 }
@@ -297,16 +319,7 @@ pub fn update_interest_rate_config(
     spread_bps: Option<i128>,
 ) -> Result<(), InterestRateError> {
     // Check authorization
-    let admin_key = InterestRateDataKey::Admin;
-    let admin = env
-        .storage()
-        .persistent()
-        .get::<InterestRateDataKey, Address>(&admin_key)
-        .ok_or(InterestRateError::Unauthorized)?;
-
-    if caller != admin {
-        return Err(InterestRateError::Unauthorized);
-    }
+    crate::admin::require_admin(env, &caller).map_err(|_| InterestRateError::Unauthorized)?;
 
     let config_key = InterestRateDataKey::InterestRateConfig;
     let mut config = get_interest_rate_config(env).ok_or(InterestRateError::InvalidParameter)?;
@@ -385,16 +398,7 @@ pub fn set_emergency_rate_adjustment(
     adjustment_bps: i128,
 ) -> Result<(), InterestRateError> {
     // Check authorization
-    let admin_key = InterestRateDataKey::Admin;
-    let admin = env
-        .storage()
-        .persistent()
-        .get::<InterestRateDataKey, Address>(&admin_key)
-        .ok_or(InterestRateError::Unauthorized)?;
-
-    if caller != admin {
-        return Err(InterestRateError::Unauthorized);
-    }
+    crate::admin::require_admin(env, &caller).map_err(|_| InterestRateError::Unauthorized)?;
 
     // Validate adjustment is within reasonable bounds
     if adjustment_bps.abs() > BASIS_POINTS_SCALE {

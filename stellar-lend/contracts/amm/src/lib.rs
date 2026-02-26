@@ -1,12 +1,25 @@
+//! # StellarLend AMM Integration Contract
+//!
+//! Provides Automated Market Maker (AMM) integration for the lending protocol,
+//! enabling token swaps, liquidity provision, and collateral optimization.
+//!
+//! ## Features
+//! - Multi-protocol AMM support with pluggable protocol configs
+//! - Slippage protection with configurable tolerances
+//! - Auto-swap for collateral optimization during lending operations
+//! - Callback validation with nonce-based replay protection
+//! - Swap and liquidity operation history for analytics
+
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{contract, contractimpl, Address, Env, Map};
 
-mod amm;
-use amm::{
+pub mod amm;
+pub use crate::amm::{
     add_amm_protocol, add_liquidity, auto_swap_for_collateral, execute_swap,
     initialize_amm_settings, remove_liquidity, update_amm_settings, validate_amm_callback,
     AmmCallbackData, AmmError, AmmProtocolConfig, AmmSettings, LiquidityParams, SwapParams,
+    TokenPair,
 };
 
 #[contract]
@@ -270,5 +283,11 @@ impl AmmContract {
     }
 }
 
+// Liquidation integration tests require lending crate; enable with feature "liquidate_integration"
+// when lending is available as a dependency.
+#[cfg(all(test, feature = "liquidate_integration"))]
+mod liquidate_test;
+#[cfg(test)]
+mod math_safety_test;
 #[cfg(test)]
 mod test;

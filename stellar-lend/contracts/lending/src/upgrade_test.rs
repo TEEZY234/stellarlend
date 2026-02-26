@@ -1,4 +1,4 @@
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Error, InvokeError};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
 
 use crate::{LendingContract, LendingContractClient, UpgradeStage};
 
@@ -6,6 +6,7 @@ fn hash(env: &Env, b: u8) -> BytesN<32> {
     BytesN::from_array(env, &[b; 32])
 }
 
+#[allow(deprecated)]
 fn setup(env: &Env, required_approvals: u32) -> (LendingContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, LendingContract);
     let client = LendingContractClient::new(env, &contract_id);
@@ -23,7 +24,7 @@ fn assert_failed<T>(_result: T) {
 fn test_init_sets_defaults() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin) = setup(&env, 2);
+    let (client, _admin) = setup(&env, 2);
 
     assert_eq!(client.current_version(), 0);
     assert_eq!(client.current_wasm_hash(), hash(&env, 1));

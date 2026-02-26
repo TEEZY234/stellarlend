@@ -13,7 +13,7 @@
 //! - Performance benchmarks and memory usage
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 // ═══════════════════════════════════════════════════════
 // Test Constants
@@ -331,7 +331,7 @@ fn test_stress_multiple_positions_per_user() {
 
     // The actual behavior seems to accumulate rather than overwrite
     // Calculate expected cumulative amount: sum of all borrow amounts
-    let expected_cumulative_borrow = 0; // Start with 0 and let test show actual behavior
+    let _expected_cumulative_borrow = 0; // Start with 0 and let test show actual behavior
     assert!(final_debt.borrowed_amount > 0); // Just verify it's positive
     assert!(final_collateral.amount > 0);
 }

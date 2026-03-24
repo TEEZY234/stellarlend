@@ -57,8 +57,7 @@ describe('Lending Controller', () => {
         amount: '1000000',
     };
 
-    it.each(['deposit', 'borrow', 'repay', 'withdraw'])
-      ('should return unsigned XDR for %s', async (operation) => {
+    it.each(['deposit', 'borrow', 'repay', 'withdraw'])('should return unsigned XDR for %s', async (operation) => {
         const response = await request(app)
           .get(`/api/lending/prepare/${operation}`)
           .send(validBody);
@@ -67,7 +66,7 @@ describe('Lending Controller', () => {
         expect(response.body.unsignedXdr).toBe('unsigned_xdr_string');
         expect(response.body.operation).toBe(operation);
         expect(response.body.expiresAt).toBeDefined();
-      });
+    });
 
     it('should return 400 for invalid operation', async () => {
       const response = await request(app).get('/api/lending/prepare/invalid_op').send(validBody);

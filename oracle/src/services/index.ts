@@ -15,3 +15,6 @@ export type { AggregatorConfig } from './price-aggregator.js';
 
 export { ContractUpdater, createContractUpdater } from './contract-updater.js';
 export type { ContractUpdaterConfig } from './contract-updater.js';
+
+export { PriceHistoryService, createPriceHistoryService } from './price-history.js';
+export type { PriceHistoryConfig, PriceHistoryEntry, TWAPResult } from './price-history.js';

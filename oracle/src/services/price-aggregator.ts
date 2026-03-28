@@ -13,6 +13,7 @@ import type {
 import { BasePriceProvider } from '../providers/base-provider.js';
 import { PriceValidator } from './price-validator.js';
 import { PriceCache } from './cache.js';
+import { PriceHistoryService } from './price-history.js';
 import { scalePrice } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -39,12 +40,14 @@ export class PriceAggregator {
     private providers: BasePriceProvider[];
     private validator: PriceValidator;
     private cache: PriceCache;
+    private priceHistory: PriceHistoryService;
     private config: AggregatorConfig;
 
     constructor(
         providers: BasePriceProvider[],
         validator: PriceValidator,
         cache: PriceCache,
+        priceHistory: PriceHistoryService,
         config: Partial<AggregatorConfig> = {},
     ) {
         this.providers = providers
@@ -53,6 +56,7 @@ export class PriceAggregator {
 
         this.validator = validator;
         this.cache = cache;
+        this.priceHistory = priceHistory;
         this.config = { ...DEFAULT_CONFIG, ...config };
 
         logger.info('Price aggregator initialized', {
@@ -92,6 +96,9 @@ export class PriceAggregator {
         const aggregated = this.aggregate(upperAsset, validPrices);
 
         this.cache.setPrice(upperAsset, aggregated.price);
+        
+        // Store in price history
+        this.priceHistory.addAggregatedPrice(aggregated);
 
         return aggregated;
     }
@@ -236,6 +243,13 @@ export class PriceAggregator {
     }
 
     /**
+     * Get price history service
+     */
+    getPriceHistory(): PriceHistoryService {
+        return this.priceHistory;
+    }
+
+    /**
      * Get list of enabled providers
      */
     getProviders(): string[] {
@@ -249,6 +263,7 @@ export class PriceAggregator {
         return {
             enabledProviders: this.providers.length,
             cacheStats: this.cache.getStats(),
+            priceHistoryStats: this.priceHistory.getStats(),
         };
     }
 }
@@ -260,7 +275,8 @@ export function createAggregator(
     providers: BasePriceProvider[],
     validator: PriceValidator,
     cache: PriceCache,
+    priceHistory: PriceHistoryService,
     config?: Partial<AggregatorConfig>,
 ): PriceAggregator {
-    return new PriceAggregator(providers, validator, cache, config);
+    return new PriceAggregator(providers, validator, cache, priceHistory, config);
 }

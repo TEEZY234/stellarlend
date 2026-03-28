@@ -350,6 +350,357 @@ describe('ContractUpdater', () => {
         });
     });
 
+    describe('comprehensive error path tests', () => {
+        describe('RPC connection timeout', () => {
+            it('should handle RPC timeout during account fetch', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'getAccount').mockRejectedValue(new Error('RPC timeout: Connection timed out after 30 seconds'));
+
+                const result = await updater.updatePrice('XLM', 150000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('timeout');
+                expect(result.asset).toBe('XLM');
+                expect(result.price).toBe(150000n);
+            });
+
+            it('should recover gracefully from RPC timeout with retries', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                let attemptCount = 0;
+                vi.spyOn(mockServer, 'getAccount').mockImplementation(async () => {
+                    attemptCount++;
+                    if (attemptCount <= 2) {
+                        throw new Error('RPC timeout: Connection timed out after 30 seconds');
+                    }
+                    return {
+                        accountId: () => 'GTEST123',
+                        sequenceNumber: () => '1',
+                        incrementSequenceNumber: vi.fn(),
+                    };
+                });
+
+                const result = await updater.updatePrice('XLM', 150000n, Date.now());
+
+                expect(result.success).toBe(true);
+                expect(attemptCount).toBe(3); // Should retry and succeed
+            });
+        });
+
+        describe('Transaction simulation failure', () => {
+            it('should handle simulation failure with detailed error', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Contract execution error: Insufficient gas',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('BTC', 50000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Simulation failed');
+                expect(result.error).toContain('Insufficient gas');
+                expect(result.asset).toBe('BTC');
+                expect(result.price).toBe(50000000000n);
+            });
+
+            it('should handle simulation failure with invalid contract method', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Method "set_asset_price" not found in contract',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('ETH', 1000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Method "set_asset_price" not found');
+            });
+
+            it('should handle simulation failure with authorization error', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Authorization failed: Invalid admin signature',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('USDC', 1000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Authorization failed');
+            });
+        });
+
+        describe('Network error during submission', () => {
+            it('should handle network error during transaction submission', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'sendTransaction').mockRejectedValue(new Error('Network error: ECONNREFUSED - Connection refused'));
+
+                const result = await updater.updatePrice('XLM', 150000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Network error');
+                expect(result.error).toContain('ECONNREFUSED');
+            });
+
+            it('should handle network error with rate limiting', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'sendTransaction').mockRejectedValue(new Error('Rate limit exceeded: Too many requests, try again later'));
+
+                const result = await updater.updatePrice('BTC', 50000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Rate limit exceeded');
+            });
+
+            it('should handle network error with DNS resolution failure', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'sendTransaction').mockRejectedValue(new Error('DNS resolution failed: Unable to resolve host'));
+
+                const result = await updater.updatePrice('ETH', 1000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('DNS resolution failed');
+            });
+        });
+
+        describe('Invalid admin key', () => {
+            it('should handle invalid admin secret key format', async () => {
+                const invalidUpdater = createContractUpdater({
+                    ...mockConfig,
+                    adminSecretKey: 'INVALID_SECRET_KEY_FORMAT',
+                });
+
+                const result = await invalidUpdater.updatePrice('XLM', 150000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toBeDefined();
+            });
+
+            it('should handle admin key with insufficient permissions', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Admin does not have required permissions',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('USDC', 1000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Admin does not have required permissions');
+            });
+
+            it('should handle admin key that is not the contract admin', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Only contract admin can set prices',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('BTC', 50000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Only contract admin can set prices');
+            });
+        });
+
+        describe('Contract not found', () => {
+            it('should handle invalid contract ID', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Contract not found: Invalid contract ID format',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('XLM', 150000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Contract not found');
+            });
+
+            it('should handle contract that does not exist on network', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Contract not deployed on network',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('ETH', 1000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Contract not deployed');
+            });
+
+            it('should handle contract access denied', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: 'Simulation failed: Access denied: Contract is private',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('USDC', 1000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toContain('Access denied');
+            });
+        });
+
+        describe('Service recovery scenarios', () => {
+            it('should recover from temporary network issues', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                let attemptCount = 0;
+                vi.spyOn(mockServer, 'sendTransaction').mockImplementation(async () => {
+                    attemptCount++;
+                    if (attemptCount <= 2) {
+                        throw new Error('Network temporarily unavailable');
+                    }
+                    return {
+                        status: 'PENDING',
+                        hash: 'recovery-tx-hash',
+                    };
+                });
+
+                const result = await updater.updatePrice('XLM', 150000n, Date.now());
+
+                expect(result.success).toBe(true);
+                expect(result.transactionHash).toBe('recovery-tx-hash');
+                expect(attemptCount).toBe(3);
+            });
+
+            it('should maintain service state after multiple failures', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                // First request fails
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValueOnce({
+                    error: 'Simulation failed: Temporary issue',
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValueOnce(true);
+
+                const result1 = await updater.updatePrice('XLM', 150000n, Date.now());
+                expect(result1.success).toBe(false);
+
+                // Second request succeeds
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValueOnce({
+                    results: [{ xdr: 'mock-xdr' }],
+                });
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValueOnce(false);
+
+                const result2 = await updater.updatePrice('BTC', 50000000000n, Date.now());
+                expect(result2.success).toBe(true);
+            });
+
+            it('should provide descriptive error messages for debugging', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                const detailedError = 'Simulation failed: Contract execution error: Insufficient gas limit. Required: 50000, Available: 30000';
+                vi.spyOn(mockServer, 'simulateTransaction').mockResolvedValue({
+                    error: detailedError,
+                    result: null,
+                } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError').mockReturnValue(true);
+
+                const result = await updater.updatePrice('ETH', 1000000000n, Date.now());
+
+                expect(result.success).toBe(false);
+                expect(result.error).toBe(detailedError);
+                expect(result.error).toContain('Insufficient gas limit');
+                expect(result.error).toContain('Required: 50000');
+            });
+        });
+
+        describe('Batch error handling', () => {
+            it('should handle mixed success and failure in batch updates', async () => {
+                const { SorobanRpc } = await import('@stellar/stellar-sdk');
+                const mockServer = new SorobanRpc.Server('mock');
+
+                // First price succeeds, second fails
+                vi.spyOn(mockServer, 'simulateTransaction')
+                    .mockResolvedValueOnce({ results: [{ xdr: 'mock-xdr' }] })
+                    .mockResolvedValueOnce({
+                        error: 'Simulation failed: Contract error',
+                        result: null,
+                    } as any);
+
+                vi.spyOn(SorobanRpc.Api, 'isSimulationError')
+                    .mockReturnValueOnce(false)
+                    .mockReturnValueOnce(true);
+
+                const prices: AggregatedPrice[] = [
+                    {
+                        asset: 'XLM',
+                        price: 150000n,
+                        timestamp: Math.floor(Date.now() / 1000),
+                        sources: [],
+                        confidence: 95,
+                    },
+                    {
+                        asset: 'BTC',
+                        price: 50000000000n,
+                        timestamp: Math.floor(Date.now() / 1000),
+                        sources: [],
+                        confidence: 98,
+                    },
+                ];
+
+                const results = await updater.updatePrices(prices);
+
+                expect(results).toHaveLength(2);
+                expect(results[0].success).toBe(true);
+                expect(results[1].success).toBe(false);
+                expect(results[1].error).toBeDefined();
+            });
+        });
+    });
+
     describe('healthCheck', () => {
         it('should return true for accessible contract', async () => {
             const isHealthy = await updater.healthCheck();

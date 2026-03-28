@@ -2,37 +2,60 @@ export interface DepositRequest {
   userAddress: string;
   assetAddress?: string;
   amount: string;
-  userSecret: string;
 }
 
 export interface BorrowRequest {
   userAddress: string;
   assetAddress?: string;
   amount: string;
-  userSecret: string;
 }
 
 export interface RepayRequest {
   userAddress: string;
   assetAddress?: string;
   amount: string;
-  userSecret: string;
 }
 
 export interface WithdrawRequest {
   userAddress: string;
   assetAddress?: string;
   amount: string;
-  userSecret: string;
+}
+
+export type LendingOperation = 'deposit' | 'borrow' | 'repay' | 'withdraw';
+
+export interface PrepareRequest {
+  userAddress: string;
+  assetAddress?: string;
+  amount: string;
+}
+
+export interface PrepareResponse {
+  unsignedXdr: string;
+  operation: LendingOperation;
+  expiresAt: string;
+}
+
+export interface SubmitRequest {
+  signedXdr: string;
+  operation?: LendingOperation;
+  userAddress?: string;
+  amount?: string;
+  assetAddress?: string;
 }
 
 export interface TransactionResponse {
   success: boolean;
   transactionHash?: string;
-  status: 'pending' | 'success' | 'failed';
+  status: 'pending' | 'success' | 'failed' | 'cancelled';
   message?: string;
   error?: string;
   ledger?: number;
+  /**
+   * Optional raw provider payload for debugging (e.g. Horizon or RPC result details).
+   * Kept generic since provider response shapes differ.
+   */
+  details?: unknown;
 }
 
 export interface PositionResponse {
@@ -59,3 +82,35 @@ export enum TransactionStatus {
   FAILED = 'failed',
   NOT_FOUND = 'not_found',
 }
+
+// ─── WebSocket Types ───────────────────────────────────────────────────────────
+
+export interface PriceData {
+  asset: string;
+  price: number;
+  timestamp: number;
+}
+
+export interface WsSubscribeMessage {
+  type: 'subscribe';
+  /** Asset symbols to subscribe to, e.g. ["XLM","BTC"] or ["*"] for all */
+  assets: string[];
+}
+
+export interface WsUnsubscribeMessage {
+  type: 'unsubscribe';
+  assets: string[];
+}
+
+export interface WsPingMessage {
+  type: 'ping';
+}
+
+export type ClientMessage = WsSubscribeMessage | WsUnsubscribeMessage | WsPingMessage;
+
+export type ServerMessage =
+  | { type: 'price_update'; asset: string; price: number; timestamp: number }
+  | { type: 'subscribed'; assets: string[] }
+  | { type: 'unsubscribed'; assets: string[] }
+  | { type: 'pong' }
+  | { type: 'error'; message: string };

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, String, Symbol, Vec, Val};
+use soroban_sdk::{contracttype, Address, Bytes, String, Symbol, Vec};
 
 // ========================================================================
 // Proposal Types
@@ -33,22 +33,26 @@ pub enum ProposalType {
     MinCollateralRatio(i128),
     /// Change risk parameters (min_cr, liq_threshold, close_factor, liq_incentive)
     RiskParams(Option<i128>, Option<i128>, Option<i128>, Option<i128>),
-    /// Update asset configuration (asset, collateral_factor, liquidation_threshold, max_supply, max_borrow, can_collateralize, can_borrow)
-    AssetConfigUpdate(
-        Option<Address>,
-        Option<i128>,
-        Option<i128>,
-        Option<i128>,
-        Option<i128>,
-        Option<bool>,
-        Option<bool>,
-    ),
     /// Pause/unpause operation
     PauseSwitch(Symbol, bool),
     /// Emergency pause
     EmergencyPause(bool),
     /// Generic action for future extensions
     GenericAction(Action),
+    /// Change interest rate configuration
+    InterestRateConfig(InterestRateParams),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct InterestRateParams {
+    pub base_rate_bps: Option<i128>,
+    pub kink_utilization_bps: Option<i128>,
+    pub multiplier_bps: Option<i128>,
+    pub jump_multiplier_bps: Option<i128>,
+    pub rate_floor_bps: Option<i128>,
+    pub rate_ceiling_bps: Option<i128>,
+    pub spread_bps: Option<i128>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,7 +156,7 @@ pub struct RecoveryRequest {
 pub struct Action {
     pub target: Address,
     pub method: Symbol,
-    pub args: Vec<Val>,
+    pub args: Vec<Bytes>,
     pub value: i128,
 }
 
@@ -167,17 +171,4 @@ pub const DEFAULT_QUORUM_BPS: u32 = 4_000; // 40% default quorum
 pub const DEFAULT_VOTING_THRESHOLD: i128 = 5_000; // 50% default threshold
 pub const DEFAULT_TIMELOCK_DURATION: u64 = 7 * 24 * 60 * 60; // 7 days
 pub const DEFAULT_RECOVERY_PERIOD: u64 = 3 * 24 * 60 * 60; // 3 days
-
-// ========================================================================
-// Vote Type
-// ========================================================================
-
-#[derive(Clone, Debug, PartialEq)]
-#[contracttype]
-pub struct Vote {
-    pub voter: Address,
-    pub proposal_id: u64,
-    pub vote_type: VoteType,
-    pub voting_power: i128,
-    pub timestamp: u64,
-}
+pub const MIN_TIMELOCK_DELAY: u64 = 24 * 60 * 60; // 24 hours

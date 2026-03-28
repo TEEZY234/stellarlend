@@ -16,9 +16,9 @@
 //! - Only the admin or the designated oracle address may submit price updates.
 
 #![allow(unused)]
+use crate::admin::get_admin;
 use crate::deposit::DepositDataKey;
 use crate::events::{emit_price_updated, PriceUpdatedEvent};
-use crate::risk_management::get_admin;
 use soroban_sdk::{contracterror, contracttype, Address, Env, IntoVal, Map, Symbol, Val, Vec};
 
 /// Errors that can occur during oracle operations
@@ -65,9 +65,13 @@ pub enum OracleDataKey {
     FallbackFeed(Address),
     /// Transient price cache for improved gas efficiency
     /// Value type: CachedPrice
+    /// Primary oracle address for an asset
+    PrimaryOracle(Address),
+    /// Fallback price feed data for an asset
+    FallbackFeed(Address),
+    /// transient price cache
     PriceCache(Address),
     /// Global oracle safety and operational parameters
-    /// Value type: OracleConfig
     OracleConfig,
     /// Pause switches specifically for oracle updates: Map<Symbol, bool>
     PauseSwitches,

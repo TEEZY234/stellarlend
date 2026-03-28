@@ -150,6 +150,18 @@ This script runs:
 - Security audit (`cargo audit`)
 - Documentation generation
 
+## Docker Quickstart
+
+To run the project locally without manually installing Node.js dependencies, you can use Docker:
+
+1. Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose installed.
+2. Create your local environment files at `api/.env` and `oracle/.env` (use `.env.example` as a template).
+3. From the root directory, build and start the containers:
+   ```bash
+   docker-compose up --build
+   ```
+4. The API will be accessible at http://localhost:3000.
+
 ### Network Deployment
 
 #### Deploy to Testnet
@@ -308,9 +320,24 @@ For a complete list of entrypoints including AMM, flash loans, bridge, governanc
 
 ---
 
+##  Changelog
+See [CHANGELOG.md](CHANGELOG.md) for a full list of updates and changes.
+
+
 ## Contributing
 
-We welcome contributions! Here's how to get started:
+We welcome contributions! StellarLend participates in the **Stellar Wave Program** via [Drips](https://www.drips.network/). Contributors can earn points and rewards by picking up issues labeled **`Stellar Wave`** in the issue tracker.
+
+Types of contributions we're looking for:
+
+- **Contract improvements** — new features, optimizations, gas efficiency
+- **Security audits** — reviewing contract logic, identifying vulnerabilities
+- **Testing** — expanding test coverage, edge cases, fuzz testing, integration tests
+- **Oracle enhancements** — additional price feed sources, improved validation, fallback strategies
+- **Documentation** — protocol docs, developer guides, architecture diagrams
+- **Frontend / SDK integration** — client libraries, dashboards, monitoring tools
+
+If you're new to the project, look for issues tagged `good first issue` or `Stellar Wave` to get started.
 
 ### Development Workflow
 

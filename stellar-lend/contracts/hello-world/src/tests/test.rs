@@ -1,6 +1,7 @@
-use crate::deposit::{DepositDataKey, Position, ProtocolAnalytics, UserAnalytics};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec};
 use crate::{HelloContract, HelloContractClient};
-use soroban_sdk::{Address, Env, Map, Symbol, Vec};
+use crate::deposit::{DepositDataKey, ProtocolAnalytics};
+use crate::types::{Position, UserAnalytics};
 
 /// Helper function to create a test environment
 fn create_test_env() -> Env {
@@ -49,7 +50,7 @@ fn set_asset_params(
     collateral_factor: i128,
     max_deposit: i128,
 ) {
-    use deposit::AssetParams;
+    use crate::deposit::AssetParams;
     let params = AssetParams {
         deposit_enabled,
         collateral_factor,
@@ -2277,12 +2278,13 @@ fn test_borrow_asset_collateral_ratio_maintained() {
     let analytics = get_user_analytics(&env, &contract_id, &user).unwrap();
     // Ratio should be: collateral_value / debt_value * 10000
     // = 3000 / 1500 * 10000 = 20000 (200%)
-    assert!(analytics.collateralization_ratio >= 15000); //pub mod multisig_test;
-    pub mod cross_contract_test;
-    pub mod gov_asset_test;
-    pub mod borrow_cap_test;
-    pub mod amm_impact_test;
-    id = env.register(HelloContract, ());
+    assert!(analytics.collateralization_ratio >= 15000); // At least 150%
+}
+
+#[test]
+fn test_borrow_asset_maximum_borrow_limit() {
+    let env = create_test_env();
+    let contract_id = env.register(HelloContract, ());
     let client = HelloContractClient::new(&env, &contract_id);
 
     let user = Address::generate(&env);
@@ -5401,9 +5403,8 @@ fn test_monitoring_protocol_state_over_time() {
 }
 
 /// Test monitoring risk level changes
-
 #[test]
 fn test_placeholder() {
-    // Legacy helper file.
+    // Legacy helper file. 
     // Actual tests are in specialized files like fees_test.rs.
 }

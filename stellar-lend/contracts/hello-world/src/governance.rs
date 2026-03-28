@@ -1,9 +1,16 @@
 #![allow(unused_variables)]
 
-use soroban_sdk::{token::TokenClient, Address, Env, String, Symbol, Val, Vec};
+use soroban_sdk::{token::TokenClient, Address, Env, String, Symbol, Vec};
 
-use crate::errors::GovernanceError;
-use crate::storage::{GovernanceDataKey, GuardianConfig};
+pub use crate::errors::GovernanceError;
+pub use crate::storage::{GovernanceDataKey, GuardianConfig};
+
+pub use crate::types::{
+    GovernanceConfig, MultisigConfig, Proposal, ProposalOutcome, ProposalStatus, ProposalType,
+    RecoveryRequest, VoteInfo, VoteType, BASIS_POINTS_SCALE, DEFAULT_EXECUTION_DELAY,
+    DEFAULT_QUORUM_BPS, DEFAULT_RECOVERY_PERIOD, DEFAULT_TIMELOCK_DURATION, DEFAULT_VOTING_PERIOD,
+    DEFAULT_VOTING_THRESHOLD, MIN_TIMELOCK_DELAY,
+};
 
 use crate::events::{
     GovernanceInitializedEvent, GuardianAddedEvent, GuardianRemovedEvent, ProposalApprovedEvent,
@@ -12,12 +19,10 @@ use crate::events::{
     VoteCastEvent,
 };
 
-use crate::types::{
-    Action, GovernanceConfig, MultisigConfig, Proposal, ProposalOutcome, ProposalStatus, ProposalType,
-    RecoveryRequest, Vote, VoteInfo, VoteType, BASIS_POINTS_SCALE, DEFAULT_EXECUTION_DELAY,
-    DEFAULT_QUORUM_BPS, DEFAULT_RECOVERY_PERIOD, DEFAULT_TIMELOCK_DURATION, DEFAULT_VOTING_PERIOD,
-    DEFAULT_VOTING_THRESHOLD,
-};
+use crate::{interest_rate, risk_management, risk_params};
+
+/// Maximum byte length for a proposal description string.
+pub const MAX_DESCRIPTION_LEN: u32 = 256;
 
 // ========================================================================
 // Initialization
@@ -109,6 +114,10 @@ pub fn create_proposal(
     voting_threshold: Option<i128>,
 ) -> Result<u64, GovernanceError> {
     proposer.require_auth();
+
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(GovernanceError::InputTooLong);
+    }
 
     let config: GovernanceConfig = env
         .storage()
@@ -426,53 +435,178 @@ pub fn execute_proposal(
 
 fn execute_proposal_type(env: &Env, proposal_type: &ProposalType) -> Result<(), GovernanceError> {
     match proposal_type {
-        ProposalType::MinCollateralRatio(val) => {
-            crate::risk_params::set_risk_params(env, Some(*val), None, None, None)
+        ProposalType::MinCollateralRatio(ratio) => {
+            risk_params::set_risk_params(env, Some(*ratio), None, None, None)
                 .map_err(|_| GovernanceError::ExecutionFailed)?;
         }
-        ProposalType::RiskParams(min_cr, liq_threshold, close_factor, liq_incentive) => {
-            crate::risk_params::set_risk_params(
-                env,
-                *min_cr,
-                *liq_threshold,
-                *close_factor,
-                *liq_incentive,
-            )
-            .map_err(|_| GovernanceError::ExecutionFailed)?;
+        ProposalType::RiskParams(mcr, lt, cf, li) => {
+            risk_params::set_risk_params(env, *mcr, *lt, *cf, *li)
+                .map_err(|_| GovernanceError::ExecutionFailed)?;
         }
-        ProposalType::AssetConfigUpdate(asset, cf, lt, ms, mb, cc, cb) => {
-            crate::cross_asset::update_asset_config(
+        ProposalType::InterestRateConfig(params) => {
+            let admin = get_admin(env).ok_or(GovernanceError::NotInitialized)?;
+            interest_rate::update_interest_rate_config(
                 env,
-                asset.clone(),
-                *cf,
-                *lt,
-                *ms,
-                *mb,
-                *cc,
-                *cb,
+                admin,
+                params.base_rate_bps,
+                params.kink_utilization_bps,
+                params.multiplier_bps,
+                params.jump_multiplier_bps,
+                params.rate_floor_bps,
+                params.rate_ceiling_bps,
+                params.spread_bps,
             )
             .map_err(|_| GovernanceError::ExecutionFailed)?;
         }
         ProposalType::PauseSwitch(op, paused) => {
-            let admin = env.current_contract_address();
-            crate::risk_management::set_pause_switch(env, admin, op.clone(), *paused)
+            let admin = get_admin(env).ok_or(GovernanceError::NotInitialized)?;
+            risk_management::set_pause_switch(env, admin, op.clone(), *paused)
                 .map_err(|_| GovernanceError::ExecutionFailed)?;
         }
         ProposalType::EmergencyPause(paused) => {
-            let admin = env.current_contract_address();
-            crate::risk_management::set_emergency_pause(env, admin, *paused)
+            let admin = get_admin(env).ok_or(GovernanceError::NotInitialized)?;
+            risk_management::set_emergency_pause(env, admin, *paused)
                 .map_err(|_| GovernanceError::ExecutionFailed)?;
         }
-        ProposalType::GenericAction(action) => {
-            execute_generic_action(env, action)?;
+        ProposalType::GenericAction(_) => {
+            return Err(GovernanceError::InvalidProposalType);
         }
     }
     Ok(())
 }
 
-fn execute_generic_action(env: &Env, action: &Action) -> Result<(), GovernanceError> {
-    env.invoke_contract::<Val>(&action.target, &action.method, action.args.clone());
-    Ok(())
+pub fn create_admin_proposal(
+    env: &Env,
+    admin: Address,
+    proposal_type: ProposalType,
+    description: String,
+) -> Result<u64, GovernanceError> {
+    admin.require_auth();
+
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(GovernanceError::InputTooLong);
+    }
+
+    let stored_admin: Address = env
+        .storage()
+        .instance()
+        .get(&GovernanceDataKey::Admin)
+        .ok_or(GovernanceError::NotInitialized)?;
+
+    if admin != stored_admin {
+        return Err(GovernanceError::Unauthorized);
+    }
+
+    let config: GovernanceConfig = env
+        .storage()
+        .instance()
+        .get(&GovernanceDataKey::Config)
+        .ok_or(GovernanceError::NotInitialized)?;
+
+    let now = env.ledger().timestamp();
+    let proposal_id: u64 = env
+        .storage()
+        .instance()
+        .get(&GovernanceDataKey::NextProposalId)
+        .unwrap_or(0);
+
+    let execution_time = now + config.execution_delay.max(MIN_TIMELOCK_DELAY);
+
+    let proposal = Proposal {
+        id: proposal_id,
+        proposer: admin.clone(),
+        proposal_type,
+        description,
+        status: ProposalStatus::Queued,
+        start_time: now,
+        end_time: now,
+        execution_time: Some(execution_time),
+        voting_threshold: 0,
+        for_votes: 0,
+        against_votes: 0,
+        abstain_votes: 0,
+        total_voting_power: 0,
+        created_at: now,
+    };
+
+    env.storage()
+        .persistent()
+        .set(&GovernanceDataKey::Proposal(proposal_id), &proposal);
+
+    env.storage()
+        .instance()
+        .set(&GovernanceDataKey::NextProposalId, &(proposal_id + 1));
+
+    emit_proposal_created_event(env, &proposal_id, &admin);
+
+    let topics = (Symbol::new(env, "proposal_queued"), proposal_id);
+    env.events().publish(topics, execution_time);
+
+    Ok(proposal_id)
+}
+
+pub fn create_emergency_proposal(
+    env: &Env,
+    caller: Address,
+    proposal_type: ProposalType,
+    description: String,
+) -> Result<u64, GovernanceError> {
+    caller.require_auth();
+
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(GovernanceError::InputTooLong);
+    }
+
+    // Verification of multisig auth happens via approvals in multisig module,
+    // but for "emergency bypass" we can allow direct execution if called by a valid multisig admin
+    // assuming it's correctly authorized by the multisig threshold.
+    // In this simplified version, we'll check against multisig admins.
+
+    let multisig_config: MultisigConfig = env
+        .storage()
+        .instance()
+        .get(&GovernanceDataKey::MultisigConfig)
+        .ok_or(GovernanceError::NotInitialized)?;
+
+    if !multisig_config.admins.contains(&caller) {
+        return Err(GovernanceError::Unauthorized);
+    }
+
+    let now = env.ledger().timestamp();
+    let proposal_id: u64 = env
+        .storage()
+        .instance()
+        .get(&GovernanceDataKey::NextProposalId)
+        .unwrap_or(0);
+
+    let proposal = Proposal {
+        id: proposal_id,
+        proposer: caller.clone(),
+        proposal_type,
+        description,
+        status: ProposalStatus::Queued,
+        start_time: now,
+        end_time: now,
+        execution_time: Some(now), // No delay for emergency
+        voting_threshold: 0,
+        for_votes: 0,
+        against_votes: 0,
+        abstain_votes: 0,
+        total_voting_power: 0,
+        created_at: now,
+    };
+
+    env.storage()
+        .persistent()
+        .set(&GovernanceDataKey::Proposal(proposal_id), &proposal);
+
+    env.storage()
+        .instance()
+        .set(&GovernanceDataKey::NextProposalId, &(proposal_id + 1));
+
+    emit_proposal_created_event(env, &proposal_id, &caller);
+
+    Ok(proposal_id)
 }
 
 // ========================================================================
@@ -610,6 +744,91 @@ pub fn get_proposal_approvals(env: &Env, proposal_id: u64) -> Option<Vec<Address
     env.storage().persistent().get(&approvals_key)
 }
 
+pub fn get_multisig_config(env: &Env) -> Option<MultisigConfig> {
+    env.storage()
+        .instance()
+        .get(&GovernanceDataKey::MultisigConfig)
+}
+
+pub fn get_multisig_admins(env: &Env) -> Option<Vec<Address>> {
+    get_multisig_config(env).map(|c| c.admins)
+}
+
+pub fn get_multisig_threshold(env: &Env) -> u32 {
+    get_multisig_config(env).map(|c| c.threshold).unwrap_or(1)
+}
+
+pub fn set_multisig_admins(
+    env: &Env,
+    caller: Address,
+    admins: Vec<Address>,
+) -> Result<(), GovernanceError> {
+    let config = get_multisig_config(env).ok_or(GovernanceError::NotInitialized)?;
+    set_multisig_config(env, caller, admins, config.threshold)
+}
+
+pub fn set_multisig_threshold(
+    env: &Env,
+    caller: Address,
+    threshold: u32,
+) -> Result<(), GovernanceError> {
+    let config = get_multisig_config(env).ok_or(GovernanceError::NotInitialized)?;
+    set_multisig_config(env, caller, config.admins, threshold)
+}
+
+pub fn propose_set_min_collateral_ratio(
+    env: &Env,
+    proposer: Address,
+    new_ratio: i128,
+) -> Result<u64, GovernanceError> {
+    create_proposal(
+        env,
+        proposer,
+        ProposalType::MinCollateralRatio(new_ratio),
+        String::from_str(env, "Update min collateral ratio"),
+        None,
+    )
+}
+
+pub fn execute_multisig_proposal(
+    env: &Env,
+    executor: Address,
+    proposal_id: u64,
+) -> Result<(), GovernanceError> {
+    executor.require_auth();
+
+    let multisig_config = get_multisig_config(env).ok_or(GovernanceError::NotInitialized)?;
+    if !multisig_config.admins.contains(&executor) {
+        return Err(GovernanceError::Unauthorized);
+    }
+
+    let mut proposal: Proposal = env
+        .storage()
+        .persistent()
+        .get(&GovernanceDataKey::Proposal(proposal_id))
+        .ok_or(GovernanceError::ProposalNotFound)?;
+
+    if proposal.status != ProposalStatus::Pending {
+        return Err(GovernanceError::InvalidProposalStatus);
+    }
+
+    let approvals = get_proposal_approvals(env, proposal_id).unwrap_or_else(|| Vec::new(env));
+    if approvals.len() < multisig_config.threshold {
+        return Err(GovernanceError::InsufficientApprovals);
+    }
+
+    execute_proposal_type(env, &proposal.proposal_type)?;
+
+    proposal.status = ProposalStatus::Executed;
+    env.storage()
+        .persistent()
+        .set(&GovernanceDataKey::Proposal(proposal_id), &proposal);
+
+    emit_proposal_executed_event(env, &proposal_id, &executor);
+
+    Ok(())
+}
+
 // ============================================================================
 // Events
 // ============================================================================
@@ -623,11 +842,12 @@ fn emit_proposal_created_event(env: &Env, proposal_id: &u64, proposer: &Address)
     env.events().publish(topics, ());
 }
 
+#[allow(dead_code)]
 fn emit_vote_cast_event(
     env: &Env,
     proposal_id: &u64,
     voter: &Address,
-    vote: &Vote,
+    vote: &VoteType,
     voting_power: &i128,
 ) {
     let topics = (Symbol::new(env, "vote_cast"), *proposal_id, voter.clone());
@@ -643,17 +863,9 @@ pub fn emit_proposal_executed_event(env: &Env, proposal_id: &u64, executor: &Add
     env.events().publish(topics, ());
 }
 
+#[allow(dead_code)]
 fn emit_proposal_failed_event(env: &Env, proposal_id: &u64) {
     let topics = (Symbol::new(env, "proposal_failed"), *proposal_id);
-    env.events().publish(topics, ());
-}
-
-pub fn emit_approval_event(env: &Env, proposal_id: &u64, approver: &Address) {
-    let topics = (
-        Symbol::new(env, "proposal_approved"),
-        *proposal_id,
-        approver.clone(),
-    );
     env.events().publish(topics, ());
 }
 
@@ -975,12 +1187,6 @@ pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&GovernanceDataKey::Admin)
 }
 
-pub fn get_multisig_config(env: &Env) -> Option<MultisigConfig> {
-    env.storage()
-        .instance()
-        .get(&GovernanceDataKey::MultisigConfig)
-}
-
 pub fn emit_guardian_added_event(env: &Env, guardian: &Address) {
     let topics = (Symbol::new(env, "guardian_added"), guardian.clone());
     env.events().publish(topics, ());
@@ -1018,54 +1224,8 @@ pub fn emit_recovery_executed_event(
 ) {
     let topics = (
         Symbol::new(env, "recovery_executed"),
-        old_admin,
-        new_admin,
-        executor,
+        old_admin.clone(),
+        new_admin.clone(),
     );
-    env.events().publish(topics, ());
-}
-
-// Wrapper functions for multisig operations to maintain compatibility
-pub fn get_multisig_admins(env: &Env) -> Option<Vec<Address>> {
-    crate::multisig::get_ms_admins(env)
-}
-
-pub fn get_multisig_threshold(env: &Env) -> u32 {
-    crate::multisig::get_ms_threshold(env)
-}
-
-pub fn get_guardian_config(env: &Env) -> Option<GuardianConfig> {
-    crate::storage::get_guardian_config(env)
-}
-
-pub fn get_recovery_request(env: &Env) -> Option<RecoveryRequest> {
-    crate::storage::get_recovery_request(env)
-}
-
-pub fn get_recovery_approvals(env: &Env) -> Option<Vec<Address>> {
-    crate::storage::get_recovery_approvals(env)
-}
-
-pub fn get_proposals(env: &Env, start_id: u64, limit: u32) -> Vec<Proposal> {
-    crate::storage::get_proposals(env, start_id, limit)
-}
-
-pub fn can_vote(env: &Env, voter: Address, proposal_id: u64) -> bool {
-    crate::storage::can_vote(env, voter, proposal_id)
-}
-
-pub fn set_multisig_admins(env: &Env, caller: Address, admins: Vec<Address>, threshold: u32) -> Result<(), GovernanceError> {
-    crate::multisig::ms_set_admins(env, caller, admins, threshold)
-}
-
-pub fn set_multisig_threshold(env: &Env, caller: Address, threshold: u32) -> Result<(), GovernanceError> {
-    crate::multisig::set_ms_threshold(env, caller, threshold)
-}
-
-pub fn execute_multisig_proposal(env: &Env, executor: Address, proposal_id: u64) -> Result<(), GovernanceError> {
-    crate::multisig::ms_execute(env, executor, proposal_id)
-}
-
-pub fn propose_set_min_collateral_ratio(env: &Env, proposer: Address, new_ratio: u32) -> Result<u64, GovernanceError> {
-    crate::multisig::ms_propose_set_min_cr(env, proposer, new_ratio.into())
+    env.events().publish(topics, executor.clone());
 }

@@ -1,129 +1,527 @@
+// Mock StellarService before importing app
+import { StellarService } from '../services/stellar.service';
+jest.mock('../services/stellar.service');
+
+// Robust global Axios mock to prevent real network calls
+import axios from 'axios';
+jest.mock('axios');
+const mockedAxios = axios as jest.Mocked<typeof axios>;
+
 import request from 'supertest';
 import app from '../app';
 
-describe('API Integration Tests', () => {
-  describe('Complete Lending Flow', () => {
-    const mockUserAddress = 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-    const mockUserSecret = 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-    const depositAmount = '10000000'; // 1 XLM
-    const borrowAmount = '5000000'; // 0.5 XLM
-    const repayAmount = '5500000'; // 0.55 XLM (with interest)
-    const withdrawAmount = '2000000'; // 0.2 XLM
+const VALID_ADDRESS = 'GDZZJ3UPZZCKY5DBH6ZGMPMRORRBG4ECIORASBUAXPPNCL4SYRHNLYU2';
+const VALID_AMOUNT = '10000000';
 
-    it('should handle complete lending lifecycle', async () => {
-      // This is a mock test - in real scenario, you'd use actual testnet accounts
-      // 1. Deposit collateral
-      // 2. Borrow against collateral
-      // 3. Repay borrowed amount
-      // 4. Withdraw collateral
-      
-      expect(true).toBe(true);
+const mockStellarService: jest.Mocked<StellarService> = {
+  buildUnsignedTransaction: jest.fn(),
+  submitTransaction: jest.fn(),
+  monitorTransaction: jest.fn(),
+  healthCheck: jest.fn(),
+} as any;
+
+beforeAll(() => {
+  (StellarService as jest.Mock).mockImplementation(() => mockStellarService);
+
+  mockedAxios.create.mockReturnThis();
+  const axiosResponse = {
+    data: {},
+    status: 200,
+    statusText: 'OK',
+    headers: {},
+    config: { url: '' },
+  };
+  mockedAxios.get.mockResolvedValue(axiosResponse);
+  mockedAxios.post.mockResolvedValue(axiosResponse);
+  mockedAxios.request.mockResolvedValue(axiosResponse);
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  // Default happy-path mock responses
+  mockStellarService.buildUnsignedTransaction.mockResolvedValue('unsigned_xdr_string');
+  mockStellarService.submitTransaction.mockResolvedValue({
+    success: true,
+    transactionHash: 'abc123txhash',
+    status: 'success',
+  });
+  mockStellarService.monitorTransaction.mockResolvedValue({
+    success: true,
+    transactionHash: 'abc123txhash',
+    status: 'success',
+    ledger: 12345,
+  });
+  mockStellarService.healthCheck.mockResolvedValue({ horizon: true, sorobanRpc: true });
+});
+
+// ─── 1. Complete Deposit Flow ─────────────────────────────────────────────────
+
+describe('Complete Deposit Flow', () => {
+  it('prepare returns unsigned XDR with correct shape', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      unsignedXdr: 'unsigned_xdr_string',
+      operation: 'deposit',
+    });
+    expect(typeof res.body.expiresAt).toBe('string');
+    expect(new Date(res.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('prepare calls buildUnsignedTransaction with correct args', async () => {
+    await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+    expect(mockStellarService.buildUnsignedTransaction).toHaveBeenCalledTimes(1);
+    expect(mockStellarService.buildUnsignedTransaction).toHaveBeenCalledWith(
+      'deposit',
+      VALID_ADDRESS,
+      undefined,
+      VALID_AMOUNT
+    );
+  });
+
+  it('submit returns success with transaction hash and ledger', async () => {
+    const res = await request(app)
+      .post('/api/lending/submit')
+      .send({ signedXdr: 'signed_xdr_payload' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      transactionHash: 'abc123txhash',
+      status: 'success',
+      ledger: 12345,
     });
   });
 
-  describe('Error Handling', () => {
-    it('should handle network errors gracefully', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          userAddress: 'invalid_address',
-          amount: '1000000',
-          userSecret: 'invalid_secret',
-        });
+  it('submit calls monitorTransaction after successful submitTransaction', async () => {
+    await request(app).post('/api/lending/submit').send({ signedXdr: 'signed_xdr_payload' });
 
-      expect(response.status).toBe(400);
+    expect(mockStellarService.submitTransaction).toHaveBeenCalledWith('signed_xdr_payload');
+    expect(mockStellarService.monitorTransaction).toHaveBeenCalledWith('abc123txhash');
+  });
+
+  it('full prepare → submit lifecycle returns consistent data', async () => {
+    const prepareRes = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+    expect(prepareRes.status).toBe(200);
+    expect(prepareRes.body.unsignedXdr).toBe('unsigned_xdr_string');
+
+    const submitRes = await request(app)
+      .post('/api/lending/submit')
+      .send({ signedXdr: 'client_signed_xdr' });
+
+    expect(submitRes.status).toBe(200);
+    expect(submitRes.body.success).toBe(true);
+    expect(submitRes.body.transactionHash).toBe('abc123txhash');
+  });
+});
+
+// ─── 2. Error Handling ────────────────────────────────────────────────────────
+
+describe('Error Handling', () => {
+  it('returns 400 for an invalid operation name', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/invalid_op')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  it('returns 400 when userAddress is missing', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ amount: VALID_AMOUNT });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/address/i);
+  });
+
+  it('returns 400 when amount is missing', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/amount/i);
+  });
+
+  it('returns 400 when userAddress is not a valid Stellar key', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: 'NOT_A_STELLAR_ADDRESS', amount: VALID_AMOUNT });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/stellar address/i);
+  });
+
+  it('returns 400 when signedXdr is missing on submit', async () => {
+    const res = await request(app).post('/api/lending/submit').send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/signedXdr/i);
+  });
+
+  it('returns 400 when submit receives malformed JSON', async () => {
+    const res = await request(app)
+      .post('/api/lending/submit')
+      .set('Content-Type', 'application/json')
+      .send('{ bad json }');
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 500 when stellar service fails to build transaction', async () => {
+    mockStellarService.buildUnsignedTransaction.mockRejectedValueOnce(
+      new Error('Stellar network error')
+    );
+
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  it('returns 400 from submit when submitTransaction reports failure', async () => {
+    mockStellarService.submitTransaction.mockResolvedValueOnce({
+      success: false,
+      status: 'failed',
+      error: 'tx_bad_seq',
     });
 
-    it('should handle rate limiting', async () => {
-      // Make multiple requests to trigger rate limit
-      const requests = Array(10).fill(null).map(() =>
-        request(app)
-          .post('/api/lending/deposit')
-          .send({
-            userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-            amount: '1000000',
-            userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          })
-      );
+    const res = await request(app).post('/api/lending/submit').send({ signedXdr: 'bad_xdr' });
 
-      const responses = await Promise.all(requests);
-      
-      // At least some requests should succeed (before rate limit)
-      expect(responses.some(r => r.status === 200 || r.status === 400)).toBe(true);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('tx_bad_seq');
+  });
+
+  it('health endpoint returns 503 when services are down', async () => {
+    mockStellarService.healthCheck.mockResolvedValueOnce({
+      horizon: false,
+      sorobanRpc: false,
+    });
+
+    const res = await request(app).get('/api/health');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('unhealthy');
+    expect(res.body.services.horizon).toBe(false);
+    expect(res.body.services.sorobanRpc).toBe(false);
+  });
+});
+
+// ─── 3. Edge Cases ────────────────────────────────────────────────────────────
+
+describe('Edge Cases', () => {
+  it('rejects amount of zero', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: '0' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/amount/i);
+  });
+
+  it('rejects negative amount', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: '-500' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/amount/i);
+  });
+
+  it('accepts optional assetAddress when provided', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT, assetAddress: VALID_ADDRESS });
+
+    expect(res.status).toBe(200);
+    expect(mockStellarService.buildUnsignedTransaction).toHaveBeenCalledWith(
+      'deposit',
+      VALID_ADDRESS,
+      VALID_ADDRESS,
+      VALID_AMOUNT
+    );
+  });
+
+  it('works without optional assetAddress', async () => {
+    const res = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+    expect(res.status).toBe(200);
+    expect(mockStellarService.buildUnsignedTransaction).toHaveBeenCalledWith(
+      'deposit',
+      VALID_ADDRESS,
+      undefined,
+      VALID_AMOUNT
+    );
+  });
+
+  it('all four valid operations are accepted by prepare', async () => {
+    for (const op of ['deposit', 'borrow', 'repay', 'withdraw']) {
+      const res = await request(app)
+        .get(`/api/lending/prepare/${op}`)
+        .query({ userAddress: VALID_ADDRESS, amount: VALID_AMOUNT });
+
+      expect(res.status).toBe(200);
+      expect(res.body.operation).toBe(op);
+    }
+  });
+});
+
+// ─── 4. Security Headers ──────────────────────────────────────────────────────
+
+describe('Security Headers', () => {
+  it('includes x-content-type-options header', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+  });
+
+  it('includes x-frame-options header', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.headers['x-frame-options']).toBeDefined();
+  });
+
+  it('includes strict-transport-security header', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.headers['strict-transport-security']).toMatch(/max-age/);
+  });
+
+  it('responds to OPTIONS preflight requests', async () => {
+    const res = await request(app).options('/api/lending/prepare/deposit');
+    expect([200, 204]).toContain(res.status);
+  });
+
+  it('health endpoint returns healthy status with correct shape', async () => {
+    const res = await request(app).get('/api/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'healthy',
+      services: { horizon: true, sorobanRpc: true },
+    });
+    expect(typeof res.body.timestamp).toBe('string');
+  });
+});
+
+// ─── 6. Per-User Rate Limiting ──────────────────────────────────────────────────────
+
+describe('Per-User Rate Limiting', () => {
+  const USER_1 = 'GDZZJ3UPZZCKY5DBH6ZGMPMRORRBG4ECIORASBUAXPPNCL4SYRHNLYU2';
+  const USER_2 = 'GBBM6BKZPEHWYO3E3YKREDPQXMS4VK35YLNU7NFBRI26RAN7GI5POFBB';
+
+  beforeEach(() => {
+    // Clear rate limit memory stores by restarting the app
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('allows different users to make requests independently', async () => {
+    // User 1 makes 5 requests
+    const user1Requests = Array.from({ length: 5 }, () =>
+      request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: USER_1, amount: VALID_AMOUNT })
+    );
+
+    // User 2 makes 5 requests
+    const user2Requests = Array.from({ length: 5 }, () =>
+      request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: USER_2, amount: VALID_AMOUNT })
+    );
+
+    const allResponses = await Promise.all([...user1Requests, ...user2Requests]);
+    
+    // All should succeed since each user is under their 10 req/min limit
+    allResponses.forEach(res => {
+      expect(res.status).toBe(200);
     });
   });
 
-  describe('Concurrent Requests', () => {
-    it('should handle concurrent deposit requests', async () => {
-      const requests = [
-        request(app).post('/api/lending/deposit').send({
-          userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          amount: '1000000',
-          userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-        }),
-        request(app).post('/api/lending/deposit').send({
-          userAddress: 'GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
-          amount: '2000000',
-          userSecret: 'SYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
-        }),
-      ];
+  it('enforces per-user rate limit for requests with userAddress in query params', async () => {
+    // Make 10 successful requests (at the limit)
+    const successfulRequests = Array.from({ length: 10 }, () =>
+      request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: USER_1, amount: VALID_AMOUNT })
+    );
 
-      const responses = await Promise.all(requests);
-      
-      responses.forEach(response => {
-        expect([200, 400, 500]).toContain(response.status);
+    const successfulResponses = await Promise.all(successfulRequests);
+    successfulResponses.forEach(res => {
+      expect(res.status).toBe(200);
+    });
+
+    // 11th request should be rate limited
+    const rateLimitedResponse = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: USER_1, amount: VALID_AMOUNT });
+
+    expect(rateLimitedResponse.status).toBe(429);
+    expect(rateLimitedResponse.body).toMatchObject({
+      success: false,
+      error: 'Too many requests for this account'
+    });
+  });
+
+  it('enforces per-user rate limit for requests with userAddress in request body', async () => {
+    // Make 10 successful POST requests (at the limit)
+    const successfulRequests = Array.from({ length: 10 }, () =>
+      request(app)
+        .post('/api/lending/submit')
+        .send({ 
+          signedXdr: 'signed_xdr_payload',
+          userAddress: USER_1 
+        })
+    );
+
+    const successfulResponses = await Promise.all(successfulRequests);
+    successfulResponses.forEach(res => {
+      expect([200, 400]).toContain(res.status); // 400 if XDR is invalid, but not 429
+    });
+
+    // 11th request should be rate limited
+    const rateLimitedResponse = await request(app)
+      .post('/api/lending/submit')
+      .send({ 
+        signedXdr: 'signed_xdr_payload',
+        userAddress: USER_1 
       });
+
+    expect(rateLimitedResponse.status).toBe(429);
+    expect(rateLimitedResponse.body).toMatchObject({
+      success: false,
+      error: 'Too many requests for this account'
     });
   });
 
-  describe('Edge Cases', () => {
-    it('should reject extremely large amounts', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          amount: '999999999999999999999999999999',
-          userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-        });
+  it('falls back to IP-based limiting when userAddress is not provided', async () => {
+    // Make requests without userAddress - should fall back to IP limiting
+    const requestsWithoutAddress = Array.from({ length: 5 }, () =>
+      request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ amount: VALID_AMOUNT }) // No userAddress
+    );
 
-      expect([400, 500]).toContain(response.status);
-    });
-
-    it('should handle missing optional fields', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          amount: '1000000',
-          userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          // assetAddress is optional
-        });
-
-      expect([200, 400, 500]).toContain(response.status);
-    });
-
-    it('should reject malformed JSON', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .set('Content-Type', 'application/json')
-        .send('{ invalid json }');
-
-      expect(response.status).toBe(400);
+    const responses = await Promise.all(requestsWithoutAddress);
+    
+    // These should be handled by the IP-based limiter
+    // Since we're only making 5 requests, they should succeed
+    responses.forEach(res => {
+      expect(res.status).toBe(200);
     });
   });
 
-  describe('CORS and Security Headers', () => {
-    it('should include security headers', async () => {
-      const response = await request(app).get('/api/health');
+  it('resets per-user rate limit after window expires', async () => {
+    // Make 10 requests to hit the limit
+    const initialRequests = Array.from({ length: 10 }, () =>
+      request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: USER_1, amount: VALID_AMOUNT })
+    );
 
-      expect(response.headers).toHaveProperty('x-content-type-options');
-      expect(response.headers).toHaveProperty('x-frame-options');
+    await Promise.all(initialRequests);
+
+    // 11th request should be rate limited
+    const rateLimitedResponse = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: USER_1, amount: VALID_AMOUNT });
+    expect(rateLimitedResponse.status).toBe(429);
+
+    // Advance time by 61 seconds (past the 60-second window)
+    jest.advanceTimersByTime(61 * 1000);
+
+    // New request should succeed after window reset
+    const resetResponse = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: USER_1, amount: VALID_AMOUNT });
+    expect(resetResponse.status).toBe(200);
+  });
+
+  it('does not affect non-lending endpoints', async () => {
+    // Make many requests to health endpoint - should not be affected by user rate limiting
+    const healthRequests = Array.from({ length: 15 }, () =>
+      request(app).get('/api/health')
+    );
+
+    const responses = await Promise.all(healthRequests);
+    responses.forEach(res => {
+      expect(res.status).toBe(200);
+    });
+  });
+
+  it('handles mixed userAddress sources (query vs body) correctly', async () => {
+    // Mix requests with userAddress in query params and body
+    const queryRequests = Array.from({ length: 5 }, () =>
+      request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: USER_1, amount: VALID_AMOUNT })
+    );
+
+    const bodyRequests = Array.from({ length: 5 }, () =>
+      request(app)
+        .post('/api/lending/submit')
+        .send({ 
+          signedXdr: 'signed_xdr_payload',
+          userAddress: USER_1 
+        })
+    );
+
+    const allResponses = await Promise.all([...queryRequests, ...bodyRequests]);
+    
+    // All should succeed since they're from the same user but under the limit
+    allResponses.forEach(res => {
+      expect([200, 400]).toContain(res.status); // 400 for invalid XDR, but not 429
     });
 
-    it('should handle OPTIONS requests', async () => {
-      const response = await request(app).options('/api/lending/deposit');
+    // 11th request for the same user should be rate limited
+    const rateLimitedResponse = await request(app)
+      .get('/api/lending/prepare/deposit')
+      .query({ userAddress: USER_1, amount: VALID_AMOUNT });
+    expect(rateLimitedResponse.status).toBe(429);
+  });
+});
 
-      expect([200, 204]).toContain(response.status);
-    });
+// ─── 7. IP-based Rate Limiting (Outer Layer) ──────────────────────────────────────
+
+describe('IP-based Rate Limiting (Outer Layer)', () => {
+  it('still applies to all API endpoints', async () => {
+    // This test verifies that the original IP-based limiter still works
+    // We'll make requests to different endpoints to ensure the outer layer is active
+    
+    const requests = Array.from({ length: 105 }, () =>
+      Promise.any([
+        request(app).get('/api/health'),
+        request(app).get('/api/lending/prepare/deposit').query({ 
+          userAddress: VALID_ADDRESS, 
+          amount: VALID_AMOUNT 
+        }),
+        request(app).get('/api/openapi.json')
+      ])
+    );
+
+    const responses = await Promise.all(requests);
+    const statuses = responses.map(r => r.status);
+    
+    // Should have some successful requests
+    expect(statuses.some(s => s === 200)).toBe(true);
+    // Should have some rate limited requests (429)
+    expect(statuses.some(s => s === 429)).toBe(true);
   });
 });

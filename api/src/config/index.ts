@@ -2,6 +2,15 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+if (!process.env.CONTRACT_ID) {
+  throw new Error('CONTRACT_ID environment variable is required');
+}
+
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret || jwtSecret === 'default-secret-change-me' || jwtSecret.length < 32) {
+  throw new Error('JWT_SECRET must be set to a strong secret (min 32 chars)');
+}
+
 export const config = {
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
@@ -15,7 +24,7 @@ export const config = {
     contractId: process.env.CONTRACT_ID || '',
   },
   auth: {
-    jwtSecret: process.env.JWT_SECRET || 'default-secret-change-me',
+    jwtSecret: process.env.JWT_SECRET as string,
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '24h',
   },
   rateLimit: {
@@ -30,5 +39,13 @@ export const config = {
     maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
     retryInitialDelayMs: parseInt(process.env.RETRY_INITIAL_DELAY_MS || '1000', 10),
     retryMaxDelayMs: parseInt(process.env.RETRY_MAX_DELAY_MS || '10000', 10),
+  },
+  ws: {
+    /** Milliseconds between price poll cycles (default 30 s) */
+    priceUpdateIntervalMs: parseInt(process.env.WS_PRICE_UPDATE_INTERVAL_MS || '30000', 10),
+    /** Milliseconds between heartbeat pings (default 30 s) */
+    heartbeatIntervalMs: parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS || '30000', 10),
+    /** Optional oracle service base URL for price data (e.g. http://localhost:4000) */
+    oracleApiUrl: process.env.ORACLE_API_URL || '',
   },
 };

@@ -33,9 +33,13 @@
 // | `MAX_ENTRIES`      | 1 000  | Caps iteration cost in backup/restore          |
 // | `MAX_BACKUP_NAME`  | 32 B   | Short identifier, avoids key-space collision   |
 
+use crate::events::{
+    DataStoreBackupEvent, DataStoreInitEvent, DataStoreMigrateEvent, DataStoreRestoreEvent,
+    DataStoreSaveEvent, DataStoreWriterChangeEvent,
+};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, Env,
+    String, Vec,
 };
 
 // ═══════════════════════════════════════════════════════
@@ -161,8 +165,10 @@ impl DataStore {
             .persistent()
             .set(&StoreKey::KeyIndex, &key_index);
 
-        env.events()
-            .publish((symbol_short!("ds_init"), admin.clone()), ());
+        DataStoreInitEvent {
+            admin: admin.clone(),
+        }
+        .publish(&env);
     }
 
     // ───────────────────────────────────────────────────
@@ -190,8 +196,11 @@ impl DataStore {
             env.storage().persistent().set(&StoreKey::Writers, &writers);
         }
 
-        env.events()
-            .publish((symbol_short!("writer"), caller, writer), ());
+        DataStoreWriterChangeEvent {
+            caller: caller.clone(),
+            writer: writer.clone(),
+        }
+        .publish(&env);
     }
 
     /// Revoke write access from `writer`.
@@ -219,8 +228,11 @@ impl DataStore {
             .persistent()
             .set(&StoreKey::Writers, &new_writers);
 
-        env.events()
-            .publish((symbol_short!("writer"), caller, writer), ());
+        DataStoreWriterChangeEvent {
+            caller: caller.clone(),
+            writer: writer.clone(),
+        }
+        .publish(&env);
     }
 
     // ───────────────────────────────────────────────────
@@ -293,8 +305,12 @@ impl DataStore {
 
         env.storage().persistent().set(&store_key, &value);
 
-        env.events()
-            .publish((symbol_short!("ds_save"), caller, key), value.len());
+        DataStoreSaveEvent {
+            caller: caller.clone(),
+            key: key.clone(),
+            value_len: value.len(),
+        }
+        .publish(&env);
     }
 
     // ───────────────────────────────────────────────────
@@ -385,10 +401,12 @@ impl DataStore {
             &(snap_keys, snap_vals),
         );
 
-        env.events().publish(
-            (symbol_short!("ds_bkup"), caller, backup_name),
-            key_index.len(),
-        );
+        DataStoreBackupEvent {
+            caller: caller.clone(),
+            backup_name: backup_name.clone(),
+            key_count: key_index.len(),
+        }
+        .publish(&env);
     }
 
     // ───────────────────────────────────────────────────
@@ -462,8 +480,12 @@ impl DataStore {
             .persistent()
             .set(&StoreKey::EntryCount, &snap_len);
 
-        env.events()
-            .publish((symbol_short!("ds_rest"), caller, backup_name), snap_len);
+        DataStoreRestoreEvent {
+            caller: caller.clone(),
+            backup_name: backup_name.clone(),
+            entry_count: snap_len,
+        }
+        .publish(&env);
     }
 
     // ───────────────────────────────────────────────────
@@ -521,8 +543,12 @@ impl DataStore {
             .persistent()
             .set(&StoreKey::SchemaVersion, &new_version);
 
-        env.events()
-            .publish((symbol_short!("ds_migr"), caller, new_version), memo);
+        DataStoreMigrateEvent {
+            caller: caller.clone(),
+            new_version,
+            memo,
+        }
+        .publish(&env);
     }
 
     // ───────────────────────────────────────────────────

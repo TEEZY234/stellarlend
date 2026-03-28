@@ -1,3 +1,4 @@
+use crate::events::FlashLoanEvent;
 use soroban_sdk::{contracterror, contracttype, token, Address, Bytes, Env, IntoVal, Symbol};
 
 /// Errors that can occur during flash loan operations
@@ -86,6 +87,15 @@ pub fn flash_loan(
     if final_balance < initial_balance + fee {
         return Err(FlashLoanError::InsufficientRepayment);
     }
+
+    FlashLoanEvent {
+        receiver: receiver.clone(),
+        asset: asset.clone(),
+        amount,
+        fee,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
 
     Ok(())
 }

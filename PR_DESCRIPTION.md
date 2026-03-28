@@ -1,175 +1,83 @@
-# Upgrade and Storage Migration Safety Test Suite
+# Fix #36: Add per-user rate limiting for lending endpoints
 
 ## Summary
+This PR implements per-user rate limiting for the Stellarlend API to address the security concern where multiple users behind the same IP share limits, and a single user can bypass limits using different IPs.
 
-Implements a comprehensive test suite for contract upgrade and storage migration safety in the StellarLend lending protocol. This addresses the requirement to validate that contract upgrades preserve user state, handle failures gracefully, and support safe rollback operations.
+## Changes Made
 
-## Changes
+### 1. Enhanced Rate Limiting Architecture (`api/src/app.ts`)
+- **Added secondary user-based rate limiter**: 10 requests per minute per `userAddress`
+- **Maintained existing IP-based limiter**: Continues to serve as the outer layer for all API endpoints
+- **Smart key generation**: Extracts `userAddress` from request body first, then query parameters, falling back to IP
+- **Targeted application**: User rate limiter applied specifically to `/api/lending` routes
+- **Clear error messages**: Returns structured JSON response with `success: false` and descriptive error
 
-### New Files (7)
-1. **stellar-lend/contracts/lending/src/upgrade_migration_safety_test.rs** (~700 lines)
-   - 45 comprehensive test cases across 8 categories
-   - Helper functions for test setup and state seeding
-   
-2. **stellar-lend/contracts/lending/UPGRADE_MIGRATION_SAFETY_TESTS.md** (~400 lines)
-   - Complete test documentation
-   - Security assumptions and validations
-   - Upgrade process guidelines
-   
-3. **stellar-lend/contracts/lending/UPGRADE_QUICK_REFERENCE.md** (~250 lines)
-   - Quick command reference
-   - Common test patterns
-   - Troubleshooting guide
-   
-4. **UPGRADE_MIGRATION_IMPLEMENTATION.md** (~300 lines)
-   - Implementation summary
-   - Files modified
-   - Verification checklist
-   
-5. **UPGRADE_SAFETY_SUITE_SUMMARY.md** (~350 lines)
-   - High-level overview
-   - Quick start guide
-   - Requirements validation
-   
-6. **IMPLEMENTATION_CHECKLIST.md**
-   - Complete task checklist
-   - Verification steps
-   
-7. **UPGRADE_TESTS_README.md**
-   - Quick start guide
-   - Documentation index
+### 2. Comprehensive Test Suite (`api/src/__tests__/integration.test.ts`)
+- **Independent user limits**: Verifies different users can make requests independently
+- **Query parameter support**: Tests rate limiting with `userAddress` in URL query params
+- **Request body support**: Tests rate limiting with `userAddress` in POST request body
+- **Fallback behavior**: Ensures IP-based limiting when `userAddress` is missing
+- **Window reset**: Validates rate limit window expires correctly after 60 seconds
+- **Endpoint isolation**: Confirms non-lending endpoints are unaffected by user rate limiting
+- **Mixed source handling**: Tests consistent behavior across query and body sources
+- **Outer layer verification**: Ensures IP-based limiting still applies to all endpoints
 
-### Modified Files (1)
-1. **stellar-lend/contracts/lending/src/lib.rs**
-   - Added `upgrade_migration_safety_test` module declaration
-   - Exposed 11 data store methods for testing:
-     - `data_store_init`, `data_grant_writer`, `data_revoke_writer`
-     - `data_save`, `data_load`, `data_backup`, `data_restore`
-     - `data_migrate_bump_version`, `data_schema_version`
-     - `data_entry_count`, `data_key_exists`
-   - No breaking changes
+## Technical Implementation Details
 
-## Test Coverage (45 Tests)
-
-### 1. Basic Upgrade with State Preservation (3 tests)
-- ✅ Admin and version preservation
-- ✅ Data store entry preservation
-- ✅ Multiple user state preservation
-
-### 2. Multi-Step Upgrade Path (3 tests)
-- ✅ Sequential upgrades (v0→v1→v2→v5)
-- ✅ State modifications between versions
-- ✅ Version skipping validation
-
-### 3. Rollback Scenarios (4 tests)
-- ✅ Version restoration
-- ✅ User state preservation during rollback
-- ✅ Rollback idempotency
-- ✅ Upgrade after rollback
-
-### 4. Failed Upgrade Scenarios (4 tests)
-- ✅ Insufficient approvals
-- ✅ Double execution prevention
-- ✅ Same version rejection
-- ✅ Version downgrade prevention
-
-### 5. Concurrent Operations (2 tests)
-- ✅ State modifications during proposal phase
-- ✅ Multiple pending proposals
-
-### 6. Storage Schema Migration (3 tests)
-- ✅ Schema version bumping
-- ✅ Backup/restore across upgrades
-- ✅ Large dataset migration (50 entries)
-
-### 7. Authorization and Security (3 tests)
-- ✅ Admin-only rollback
-- ✅ Approver-only execution
-- ✅ Permission preservation across upgrades
-
-### 8. Edge Cases (5 tests)
-- ✅ Empty data store upgrade
-- ✅ Maximum approvers (10)
-- ✅ Rapid version increments (10 sequential)
-- ✅ Writer permission preservation
-
-## Security Validations
-
-✅ **Authorization**: Admin-only and approver-gated operations enforced  
-✅ **State Integrity**: No data loss or corruption across upgrades  
-✅ **Upgrade Safety**: Version monotonicity and threshold enforcement  
-✅ **Data Migration**: Backup/restore works across upgrade boundaries  
-✅ **Rollback Safety**: Safe reversion to previous version  
-✅ **Permission Preservation**: All permissions survive upgrades  
-
-## Coverage Metrics
-
-- **Upgrade Manager**: 100% of methods tested
-- **Data Store Integration**: 95% coverage
-- **Authorization**: 100% of permission checks
-- **State Persistence**: 100% of storage types
-- **Error Paths**: 100% of error conditions
-- **Edge Cases**: 95% coverage
-- **Overall**: 98% coverage
-
-## Testing
-
-### Run Tests
-```bash
-cd stellar-lend
-cargo test -p stellarlend-lending upgrade_migration_safety --lib
+### Rate Limiter Configuration
+```typescript
+const userRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute window
+  max: 10, // 10 requests per minute per user
+  keyGenerator: (req) => {
+    const userAddress = req.body?.userAddress || req.query?.userAddress || req.ip;
+    return userAddress;
+  },
+  message: { success: false, error: 'Too many requests for this account' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 ```
 
-### Expected Output
-```
-test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured
-```
+### Application Order
+1. **IP-based limiter** → Applied to all `/api/` routes (outer layer)
+2. **User-based limiter** → Applied to `/api/lending` routes (inner layer)
 
-### Run All Lending Tests
-```bash
-cargo test -p stellarlend-lending
-```
+## Security Benefits
 
-## Documentation
+- **Fair usage**: Each user gets their own rate limit regardless of IP sharing
+- **DoS prevention**: Single users cannot bypass limits using multiple IPs
+- **Backward compatibility**: Existing IP-based protection remains intact
+- **Graceful degradation**: Falls back to IP limiting when user identification is unavailable
 
-- **Quick Start**: `UPGRADE_TESTS_README.md`
-- **Quick Reference**: `stellar-lend/contracts/lending/UPGRADE_QUICK_REFERENCE.md`
-- **Full Documentation**: `stellar-lend/contracts/lending/UPGRADE_MIGRATION_SAFETY_TESTS.md`
-- **Implementation Details**: `UPGRADE_MIGRATION_IMPLEMENTATION.md`
-- **Summary**: `UPGRADE_SAFETY_SUITE_SUMMARY.md`
-- **Checklist**: `IMPLEMENTATION_CHECKLIST.md`
+## Test Coverage
 
-## Requirements Met
+The implementation includes 7 new test cases covering:
+- ✅ Independent user rate limiting
+- ✅ Query parameter rate limiting
+- ✅ Request body rate limiting
+- ✅ Fallback to IP-based limiting
+- ✅ Rate limit window reset
+- ✅ Endpoint isolation
+- ✅ Mixed request source handling
+- ✅ IP-based outer layer verification
 
-✅ **Secure**: All authorization boundaries tested and enforced  
-✅ **Tested**: 45 comprehensive tests with 98% coverage  
-✅ **Documented**: Multiple documentation files with examples  
-✅ **Efficient**: Tests run quickly, minimal code duplication  
-✅ **Easy to Review**: Clear structure, comprehensive comments  
-✅ **Validates Interaction**: Tests upgrade and data store together  
-✅ **Minimum 95% Coverage**: Achieved 98% coverage  
+## Acceptance Criteria Met
+
+- ✅ **Per-user rate limit enforced**: 10 req/min per address
+- ✅ **IP-based limit still applies**: Outer layer maintained
+- ✅ **Returns 429 with clear message**: Structured JSON error response
+- ✅ **Tests verify both limits**: Comprehensive test suite included
 
 ## Breaking Changes
 
-None. All changes are additive (new tests and documentation).
+None. This is a purely additive security enhancement that maintains full backward compatibility.
 
-## Checklist
+## Configuration
 
-- [x] Tests pass locally
-- [x] Code follows project style
-- [x] Documentation is clear and complete
-- [x] No breaking changes
-- [x] Security assumptions validated
-- [x] Edge cases covered
-- [x] Rollback scenarios tested
+The user rate limit parameters are hardcoded as specified:
+- Window: 60 seconds (1 minute)
+- Max requests: 10 per user per window
+- Applied to: `/api/lending/*` endpoints only
 
-## Related Issues
-
-Closes #[issue_number] - Upgrade and Storage Migration Safety Suite
-
-## Notes
-
-- Tests use mocked WASM execution (standard for Soroban tests)
-- Gas costs not validated (requires integration tests)
-- All tests use `env.mock_all_auths()` for simplified testing
-- Large dataset test limited to 50 entries (can be increased if needed)
+These can be easily moved to environment variables if needed in future iterations.

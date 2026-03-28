@@ -1,81 +1,156 @@
 import request from 'supertest';
 import app from '../app';
+import express from 'express';
+import { prepareValidation } from '../middleware/validation';
+import { errorHandler } from '../middleware/errorHandler';
+
+const VALID_ADDRESS = 'GDZZJ3UPZZCKY5DBH6ZGMPMRORRBG4ECIORASBUAXPPNCL4SYRHNLYU2';
 
 describe('Validation Middleware', () => {
-  describe('Deposit Validation', () => {
+  describe('Prepare Validation (GET /api/lending/prepare/:operation)', () => {
     it('should reject empty userAddress', async () => {
       const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          amount: '1000000',
-          userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-        });
+        .get('/api/lending/prepare/deposit')
+        .query({ amount: '1000000' });
 
       expect(response.status).toBe(400);
-      expect(response.body.success).toBe(false);
+      expect(response.body.error).toBeDefined();
+      expect(response.body.error).toContain('User address is required');
+    });
+
+    it('should reject invalid Stellar public key', async () => {
+      const response = await request(app).get('/api/lending/prepare/deposit').query({
+        userAddress: 'invalid-address',
+        assetAddress: 'G...',
+        amount: '100',
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBeDefined();
+      expect(response.body.error).toContain('Invalid Stellar address');
+    });
+
+    it('should reject Stellar address with wrong prefix', async () => {
+      const response = await request(app).get('/api/lending/prepare/deposit').query({
+        userAddress: 'S...', // Secret key prefix
+        assetAddress: 'G...',
+        amount: '100',
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBeDefined();
+      expect(response.body.error).toContain('Invalid Stellar address');
+    });
+
+    it('should accept valid Stellar public key', async () => {
+      const response = await request(app).get('/api/lending/prepare/deposit').query({
+        userAddress: VALID_ADDRESS,
+        assetAddress: 'G...',
+        amount: '100',
+      });
+
+      expect(response.status).not.toBe(400);
+    });
+
+    it('should reject missing amount', async () => {
+      const response = await request(app).get('/api/lending/prepare/deposit').query({
+        userAddress: VALID_ADDRESS,
+        assetAddress: 'G...',
+      });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('Amount is required');
     });
 
     it('should reject zero amount', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          amount: '0',
-          userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-        });
+      const response = await request(app).get('/api/lending/prepare/deposit').query({
+        userAddress: VALID_ADDRESS,
+        assetAddress: 'G...',
+        amount: '0',
+      });
 
       expect(response.status).toBe(400);
+      expect(response.body.error).toBeDefined();
+      expect(response.body.error).toContain('Amount must be a valid positive integer');
     });
 
     it('should reject negative amount', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          amount: '-1000',
-          userSecret: 'SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-        });
+      const response = await request(app).get('/api/lending/prepare/deposit').query({
+        userAddress: VALID_ADDRESS,
+        assetAddress: 'G...',
+        amount: '-1',
+      });
 
       expect(response.status).toBe(400);
+      expect(response.body.error).toBeDefined();
+      expect(response.body.error).toContain('Amount must be a valid positive integer');
     });
 
-    it('should reject missing userSecret', async () => {
-      const response = await request(app)
-        .post('/api/lending/deposit')
-        .send({
-          userAddress: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-          amount: '1000000',
-        });
+    it('should reject non-integer amount strings', async () => {
+      const res = await request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: '1.5' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Amount must be a valid positive integer');
+    });
+
+    it('should reject non-numeric amount strings', async () => {
+      const res = await request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: 'abc' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Amount must be a valid positive integer');
+    });
+
+    it('should reject empty amount strings', async () => {
+      const res = await request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Amount is required');
+    });
+
+    it('should accept very large valid integers (within i128)', async () => {
+      // Max i128 = 2^127 - 1
+      const maxI128 = '170141183460469231731687303715884105727';
+
+      // Validate middleware acceptance without relying on external Horizon/Soroban availability.
+      const testApp = express();
+      testApp.use(express.json());
+      testApp.get('/api/lending/prepare/:operation', prepareValidation, (req, res) => {
+        res.status(200).json({ ok: true });
+      });
+      testApp.use(errorHandler);
+
+      const res = await request(testApp)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: maxI128 });
+
+      expect(res.status).toBe(200);
+    });
+
+    it('should reject invalid operation', async () => {
+      const response = await request(app).get('/api/lending/prepare/invalid_op').query({
+        userAddress: 'GDH7NBM22WUCYOLJJZ7ALN3QZ6W2G5YCHDP2YQWJZ76L2GZFPHSYZ4Y3',
+        amount: '1000000',
+      });
 
       expect(response.status).toBe(400);
     });
   });
 
-  describe('Borrow Validation', () => {
-    it('should validate all required fields', async () => {
-      const response = await request(app)
-        .post('/api/lending/borrow')
-        .send({});
+  describe('Submit Validation (POST /api/lending/submit)', () => {
+    it('should reject missing signedXdr', async () => {
+      const response = await request(app).post('/api/lending/submit').send({});
 
       expect(response.status).toBe(400);
     });
-  });
 
-  describe('Repay Validation', () => {
-    it('should validate all required fields', async () => {
-      const response = await request(app)
-        .post('/api/lending/repay')
-        .send({});
-
-      expect(response.status).toBe(400);
-    });
-  });
-
-  describe('Withdraw Validation', () => {
-    it('should validate all required fields', async () => {
-      const response = await request(app)
-        .post('/api/lending/withdraw')
-        .send({});
+    it('should reject empty signedXdr', async () => {
+      const response = await request(app).post('/api/lending/submit').send({ signedXdr: '' });
 
       expect(response.status).toBe(400);
     });

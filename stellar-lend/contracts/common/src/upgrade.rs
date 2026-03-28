@@ -1,5 +1,10 @@
+use crate::events::{
+    UpgradeApprovalRecordedEvent, UpgradeApproverAddedEvent, UpgradeExecutedEvent,
+    UpgradeInitEvent, UpgradeProposedEvent, UpgradeRollbackEvent,
+};
 use soroban_sdk::{
-    contracterror, contracttype, panic_with_error, symbol_short, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    Vec,
 };
 
 #[contracterror]
@@ -61,11 +66,14 @@ enum UpgradeKey {
     Proposal(u64),
 }
 
+#[contract]
 pub struct UpgradeManager;
 
+#[contractimpl]
 impl UpgradeManager {
-    #[allow(deprecated)]
+    /// Initializes the upgrade manager with an admin and current implementation hash.
     pub fn init(env: Env, admin: Address, current_wasm_hash: BytesN<32>, required_approvals: u32) {
+        admin.require_auth();
         if env.storage().persistent().has(&UpgradeKey::Admin) {
             panic_with_error!(&env, UpgradeError::AlreadyInitialized);
         }
@@ -93,14 +101,17 @@ impl UpgradeManager {
             .persistent()
             .set(&UpgradeKey::CurrentVersion, &0u32);
 
-        #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("up_init"), admin), required_approvals);
+        UpgradeInitEvent {
+            admin: admin.clone(),
+            required_approvals,
+        }
+        .publish(&env);
     }
 
-    #[allow(deprecated)]
+    /// Adds an upgrade approver. Only admin can call.
     pub fn add_approver(env: Env, caller: Address, approver: Address) {
         caller.require_auth();
+        Self::assert_initialized(&env);
         Self::assert_admin(&env, &caller);
 
         let mut approvers = Self::approvers(&env);
@@ -111,38 +122,14 @@ impl UpgradeManager {
                 .set(&UpgradeKey::Approvers, &approvers);
         }
 
-        #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("up_apadd"), caller, approver), ());
+        UpgradeApproverAddedEvent {
+            caller: caller.clone(),
+            approver: approver.clone(),
+        }
+        .publish(&env);
     }
 
-    #[allow(deprecated)]
-    pub fn remove_approver(env: Env, caller: Address, approver: Address) {
-        caller.require_auth();
-        Self::assert_admin(&env, &caller);
-
-        let approvers = Self::approvers(&env);
-        let mut updated = Vec::new(&env);
-        for existing in approvers.iter() {
-            if existing != approver {
-                updated.push_back(existing);
-            }
-        }
-
-        if updated.len() == approvers.len() {
-            return;
-        }
-        if updated.is_empty() || updated.len() < Self::required_approvals(env.clone()) {
-            panic_with_error!(&env, UpgradeError::InvalidThreshold);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&UpgradeKey::Approvers, &updated);
-        env.events()
-            .publish((symbol_short!("up_aprm"), caller, approver), ());
-    }
-
+    /// Proposes a new implementation hash and target version.
     pub fn upgrade_propose(
         env: Env,
         caller: Address,
@@ -150,6 +137,7 @@ impl UpgradeManager {
         new_version: u32,
     ) -> u64 {
         caller.require_auth();
+        Self::assert_initialized(&env);
         Self::assert_admin(&env, &caller);
 
         let current_version = Self::current_version(env.clone());
@@ -190,15 +178,19 @@ impl UpgradeManager {
             .persistent()
             .set(&UpgradeKey::NextProposalId, &(id + 1));
 
-        #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("up_prop"), caller, id), new_version);
+        UpgradeProposedEvent {
+            caller: caller.clone(),
+            id,
+            new_version,
+        }
+        .publish(&env);
         id
     }
 
-    #[allow(deprecated)]
+    /// Approves a proposal. Caller must be in approvers.
     pub fn upgrade_approve(env: Env, caller: Address, proposal_id: u64) -> u32 {
         caller.require_auth();
+        Self::assert_initialized(&env);
         Self::assert_approver(&env, &caller);
 
         let mut proposal = Self::proposal(env.clone(), proposal_id);
@@ -218,20 +210,27 @@ impl UpgradeManager {
         env.storage()
             .persistent()
             .set(&UpgradeKey::Proposal(proposal_id), &proposal);
-        #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("up_appr"), caller, proposal_id), count);
+        UpgradeApprovalRecordedEvent {
+            caller: caller.clone(),
+            proposal_id,
+            approval_count: count,
+        }
+        .publish(&env);
         count
     }
 
-    #[allow(deprecated)]
+    /// Executes an approved proposal. Caller must be an approver.
     pub fn upgrade_execute(env: Env, caller: Address, proposal_id: u64) {
         caller.require_auth();
+        Self::assert_initialized(&env);
         Self::assert_approver(&env, &caller);
 
         let mut proposal = Self::proposal(env.clone(), proposal_id);
-        if proposal.stage != UpgradeStage::Approved {
+        if proposal.stage == UpgradeStage::Executed || proposal.stage == UpgradeStage::RolledBack {
             panic_with_error!(&env, UpgradeError::InvalidStatus);
+        }
+        if proposal.approvals.len() < Self::required_approvals(env.clone()) {
+            panic_with_error!(&env, UpgradeError::NotEnoughApprovals);
         }
 
         let current_hash = Self::current_wasm_hash(env.clone());
@@ -239,10 +238,6 @@ impl UpgradeManager {
         proposal.prev_wasm_hash = Some(current_hash.clone());
         proposal.prev_version = Some(current_version);
         proposal.stage = UpgradeStage::Executed;
-
-        #[cfg(not(any(test, feature = "testutils")))]
-        env.deployer()
-            .update_current_contract_wasm(proposal.new_wasm_hash.clone());
 
         env.storage()
             .persistent()
@@ -254,16 +249,18 @@ impl UpgradeManager {
             .persistent()
             .set(&UpgradeKey::Proposal(proposal_id), &proposal);
 
-        #[allow(deprecated)]
-        env.events().publish(
-            (symbol_short!("up_exec"), caller, proposal_id),
-            proposal.new_version,
-        );
+        UpgradeExecutedEvent {
+            caller: caller.clone(),
+            proposal_id,
+            new_version: proposal.new_version,
+        }
+        .publish(&env);
     }
 
-    #[allow(deprecated)]
+    /// Rolls back an executed proposal to the previous hash/version. Only admin can call.
     pub fn upgrade_rollback(env: Env, caller: Address, proposal_id: u64) {
         caller.require_auth();
+        Self::assert_initialized(&env);
         Self::assert_admin(&env, &caller);
 
         let mut proposal = Self::proposal(env.clone(), proposal_id);
@@ -271,12 +268,13 @@ impl UpgradeManager {
             panic_with_error!(&env, UpgradeError::InvalidStatus);
         }
 
-        let prev_hash = proposal.prev_wasm_hash.clone().unwrap();
-        let prev_version = proposal.prev_version.unwrap();
-
-        #[cfg(not(any(test, feature = "testutils")))]
-        env.deployer()
-            .update_current_contract_wasm(prev_hash.clone());
+        let prev_hash = proposal
+            .prev_wasm_hash
+            .clone()
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::InvalidStatus));
+        let prev_version = proposal
+            .prev_version
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::InvalidStatus));
 
         env.storage()
             .persistent()
@@ -290,14 +288,17 @@ impl UpgradeManager {
             .persistent()
             .set(&UpgradeKey::Proposal(proposal_id), &proposal);
 
-        #[allow(deprecated)]
-        env.events().publish(
-            (symbol_short!("up_roll"), caller, proposal_id),
+        UpgradeRollbackEvent {
+            caller: caller.clone(),
+            proposal_id,
             prev_version,
-        );
+        }
+        .publish(&env);
     }
 
+    /// Returns the status of a proposal.
     pub fn upgrade_status(env: Env, proposal_id: u64) -> UpgradeStatus {
+        Self::assert_initialized(&env);
         let proposal = Self::proposal(env.clone(), proposal_id);
         UpgradeStatus {
             id: proposal.id,
@@ -308,25 +309,39 @@ impl UpgradeManager {
         }
     }
 
+    /// Returns the current active implementation hash.
     pub fn current_wasm_hash(env: Env) -> BytesN<32> {
+        Self::assert_initialized(&env);
         env.storage()
             .persistent()
             .get(&UpgradeKey::CurrentWasmHash)
-            .unwrap()
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::NotInitialized))
     }
 
+    /// Returns the currently active version.
     pub fn current_version(env: Env) -> u32 {
+        Self::assert_initialized(&env);
         env.storage()
             .persistent()
             .get(&UpgradeKey::CurrentVersion)
             .unwrap_or(0)
     }
 
-    fn required_approvals(env: Env) -> u32 {
+    /// Returns the configured approval threshold.
+    pub fn required_approvals(env: Env) -> u32 {
+        Self::assert_initialized(&env);
         env.storage()
             .persistent()
             .get(&UpgradeKey::RequiredApprovals)
             .unwrap_or(0)
+    }
+
+    /// Returns true when `addr` has approval rights.
+    pub fn is_approver(env: Env, addr: Address) -> bool {
+        if !env.storage().persistent().has(&UpgradeKey::Admin) {
+            return false;
+        }
+        Self::approvers(&env).contains(&addr)
     }
 
     fn proposal(env: Env, proposal_id: u64) -> UpgradeProposal {
@@ -343,8 +358,18 @@ impl UpgradeManager {
             .unwrap_or_else(|| Vec::new(env))
     }
 
+    fn assert_initialized(env: &Env) {
+        if !env.storage().persistent().has(&UpgradeKey::Admin) {
+            panic_with_error!(env, UpgradeError::NotInitialized);
+        }
+    }
+
     fn assert_admin(env: &Env, caller: &Address) {
-        let admin: Address = env.storage().persistent().get(&UpgradeKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&UpgradeKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(env, UpgradeError::NotInitialized));
         if *caller != admin {
             panic_with_error!(env, UpgradeError::NotAuthorized);
         }

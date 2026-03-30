@@ -132,6 +132,68 @@ describe('Validation Middleware', () => {
       expect(res.status).toBe(200);
     });
 
+    // BigInt edge case tests
+    it('should accept MAX_SAFE_INTEGER', async () => {
+      const maxSafeInt = '9007199254740991';
+      
+      const testApp = express();
+      testApp.use(express.json());
+      testApp.get('/api/lending/prepare/:operation', prepareValidation, (_req: Request, res: Response) => {
+        res.status(200).json({ ok: true });
+      });
+      testApp.use(errorHandler);
+
+      const res = await request(testApp)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: maxSafeInt });
+
+      expect(res.status).toBe(200);
+    });
+
+    it('should accept very large numbers', async () => {
+      const veryLargeNumber = '99999999999999999999999999999';
+      
+      const testApp = express();
+      testApp.use(express.json());
+      testApp.get('/api/lending/prepare/:operation', prepareValidation, (_req: Request, res: Response) => {
+        res.status(200).json({ ok: true });
+      });
+      testApp.use(errorHandler);
+
+      const res = await request(testApp)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: veryLargeNumber });
+
+      expect(res.status).toBe(200);
+    });
+
+    it('should reject float amounts', async () => {
+      const res = await request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: '1.5' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Amount must be a valid positive integer');
+    });
+
+    it('should reject scientific notation', async () => {
+      const res = await request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: '1e18' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Amount must be a valid positive integer');
+    });
+
+    it('should reject negative zero', async () => {
+      const res = await request(app)
+        .get('/api/lending/prepare/deposit')
+        .query({ userAddress: VALID_ADDRESS, assetAddress: 'G...', amount: '-0' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Amount must be a valid positive integer');
+    });
+
     it('should reject invalid operation', async () => {
       const response = await request(app).get('/api/lending/prepare/invalid_op').query({
         userAddress: 'GDH7NBM22WUCYOLJJZ7ALN3QZ6W2G5YCHDP2YQWJZ76L2GZFPHSYZ4Y3',

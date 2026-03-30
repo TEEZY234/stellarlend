@@ -220,7 +220,7 @@ export function loadConfig(): OracleServiceConfig {
     maxPriceDeviationPercent: env.MAX_PRICE_DEVIATION_PERCENT,
     priceStaleThresholdSeconds: env.PRICE_STALENESS_THRESHOLD_SECONDS,
     cacheTtlSeconds: env.CACHE_TTL_SECONDS,
-    redisUrl: env.REDIS_URL,
+    redisUrl: env.REDIS_URL || undefined,
     logLevel: env.LOG_LEVEL,
     providers: getProviderConfigs(env),
     circuitBreaker: {

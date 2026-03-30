@@ -11,8 +11,11 @@ import { errorHandler } from './middleware/errorHandler';
 import { idempotencyMiddleware } from './middleware/idempotency';
 import { swaggerSpec } from './config/swagger';
 import logger from './utils/logger';
+import { requestIdMiddleware } from './middleware/requestId';
 
 const app: Application = express();
+app.use(requestIdMiddleware);
+
 const ipRateLimitStore = new MemoryStore();
 const userRateLimitStore = new MemoryStore();
 

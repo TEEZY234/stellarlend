@@ -23,6 +23,7 @@ import {
   TransactionHistoryResponse,
 } from '../types';
 import { BoundedTtlCache } from '../utils/boundedTtlCache';
+import { redisCacheService } from './redisCache.service';
 
 const CONTRACT_METHODS: Record<LendingOperation, string> = {
   deposit: 'deposit_collateral',
@@ -194,6 +195,10 @@ export class StellarService {
   }
 
   async getProtocolStats(): Promise<ProtocolStatsResponse> {
+    const redisKey = redisCacheService.buildKey('protocol', 'stats');
+    const redisCached = await redisCacheService.get<ProtocolStatsResponse>(redisKey);
+    if (redisCached) return redisCached;
+
     const cachedResponse = protocolStatsCache.get(PROTOCOL_STATS_CACHE_KEY);
     if (cachedResponse) {
       return cachedResponse;
@@ -214,6 +219,11 @@ export class StellarService {
       };
 
       protocolStatsCache.set(PROTOCOL_STATS_CACHE_KEY, response);
+      await redisCacheService.set(
+        redisKey,
+        response,
+        Math.floor(config.cache.protocolStatsTtlMs / 1000)
+      );
       return response;
     } catch (error) {
       logger.error('Failed to fetch protocol stats:', error);
@@ -406,6 +416,12 @@ export class StellarService {
     try {
       const { userAddress } = query;
       const { limit, cursor } = parsePaginationParams(query as any);
+      const historyCacheKey = redisCacheService.buildKey(
+        'position',
+        `${userAddress}:${limit}:${cursor ?? 'first'}`
+      );
+      const cached = await redisCacheService.get<TransactionHistoryResponse>(historyCacheKey);
+      if (cached) return cached;
 
       // Validate Stellar address format
       if (!this.isValidStellarAddress(userAddress)) {
@@ -430,10 +446,16 @@ export class StellarService {
         : null;
       const hasNextPage = !!response.data._links?.next;
 
-      return {
+      const result = {
         data: lendingTransactions,
-        pagination: buildPaginationMeta(nextCursor, hasNextPage, limit),
+        pagination: buildPaginationMeta(nextCursor, hasNextPage, limit ?? config.pagination.defaultLimit),
       };
+      await redisCacheService.set(
+        historyCacheKey,
+        result,
+        Math.floor(config.cache.positionTtlMs / 1000)
+      );
+      return result;
     } catch (error) {
       logger.error('Failed to fetch transaction history:', error);
       throw new InternalServerError('Failed to fetch transaction history');

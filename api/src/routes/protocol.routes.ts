@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as lendingController from '../controllers/lending.controller';
+import { requireRole } from '../middleware/rbac';
 
 const router: Router = Router();
 
@@ -26,5 +27,11 @@ const router: Router = Router();
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/stats', lendingController.protocolStats);
+router.get('/pause-status', requireRole('operator'), lendingController.getPauseStatus);
+router.post('/pause', requireRole('admin'), lendingController.setManualPause);
+router.post('/resume', requireRole('admin'), lendingController.resumeProtocol);
+router.get('/roles', requireRole('operator'), lendingController.listRoleAssignments);
+router.post('/roles/assign', requireRole('admin'), lendingController.assignAccessRole);
+router.post('/roles/revoke', requireRole('admin'), lendingController.revokeAccessRole);
 
 export default router;

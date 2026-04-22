@@ -1,13 +1,23 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Val, Vec};
 
-mod borrow;
+pub mod borrow;
 mod deposit;
-mod events;
+pub mod events;
 mod flash_loan;
-mod pause;
+pub mod pause;
 mod token_receiver;
 mod withdraw;
+
+// Re-export contract types used in the public interface so downstream tooling
+// (including fuzzing harnesses) can construct/inspect them without relying on
+// private module paths.
+pub use borrow::{BorrowCollateral, BorrowError, DebtPosition};
+pub use deposit::{DepositCollateral, DepositError};
+pub use flash_loan::FlashLoanError;
+pub use pause::PauseType;
+pub use views::UserPositionSummary;
+pub use withdraw::WithdrawError;
 
 use borrow::{
     borrow as borrow_cmd, deposit as borrow_deposit, get_admin as get_borrow_admin,
@@ -15,33 +25,32 @@ use borrow::{
     initialize_borrow_settings as initialize_borrow_logic, repay as borrow_repay,
     set_admin as set_borrow_admin,
     set_liquidation_threshold_bps as set_liquidation_threshold_logic,
-    set_oracle as set_oracle_logic, BorrowCollateral, BorrowError, DebtPosition,
+    set_oracle as set_oracle_logic,
 };
 use deposit::{
     deposit as deposit_logic, get_user_collateral as get_deposit_collateral,
-    initialize_deposit_settings as initialize_deposit_logic, DepositCollateral, DepositError,
+    initialize_deposit_settings as initialize_deposit_logic,
 };
 use flash_loan::{
     flash_loan as flash_loan_logic, set_flash_loan_fee_bps as set_flash_loan_fee_logic,
-    FlashLoanError,
 };
-use pause::{is_paused, set_pause as set_pause_logic, PauseType};
+use pause::{is_paused, set_pause as set_pause_logic};
 use token_receiver::receive as receive_logic;
 
-mod views;
+pub mod views;
 use views::{
     get_collateral_balance as view_collateral_balance,
     get_collateral_value as view_collateral_value, get_debt_balance as view_debt_balance,
     get_debt_value as view_debt_value, get_health_factor as view_health_factor,
-    get_user_position as view_user_position, UserPositionSummary,
+    get_user_position as view_user_position,
 };
 
 use withdraw::{
     initialize_withdraw_settings as initialize_withdraw_logic,
-    set_withdraw_paused as set_withdraw_paused_logic, withdraw as withdraw_logic, WithdrawError,
+    set_withdraw_paused as set_withdraw_paused_logic, withdraw as withdraw_logic,
 };
 mod data_store;
-mod upgrade;
+pub mod upgrade;
 
 #[cfg(test)]
 mod borrow_test;

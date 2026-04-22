@@ -48,4 +48,9 @@ TEST_FIX.txt
 
 # IDE / Tools
 .claude/
+.codex
+.codex/
 
+# cargo-fuzz
+stellar-lend/fuzz/artifacts/
+stellar-lend/fuzz/coverage/

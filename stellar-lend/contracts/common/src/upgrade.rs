@@ -1,6 +1,6 @@
 use crate::events::{
-    UpgradeApprovalRecordedEvent, UpgradeApproverAddedEvent, UpgradeExecutedEvent,
-    UpgradeInitEvent, UpgradeProposedEvent, UpgradeRollbackEvent,
+    UpgradeApprovalRecordedEvent, UpgradeApproverAddedEvent, UpgradeApproverRemovedEvent,
+    UpgradeExecutedEvent, UpgradeInitEvent, UpgradeProposedEvent, UpgradeRollbackEvent,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -127,6 +127,54 @@ impl UpgradeManager {
             approver: approver.clone(),
         }
         .publish(&env);
+    }
+
+    /// Removes an upgrade approver. Only admin can call.
+    ///
+    /// Safety guardrails:
+    /// - Admin cannot remove themselves as an approver.
+    /// - The approver set cannot be reduced below `required_approvals`.
+    pub fn remove_approver(env: Env, caller: Address, approver: Address) {
+        caller.require_auth();
+        Self::assert_initialized(&env);
+        Self::assert_admin(&env, &caller);
+
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&UpgradeKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, UpgradeError::NotInitialized));
+
+        if approver == admin {
+            panic_with_error!(&env, UpgradeError::NotAuthorized);
+        }
+
+        let required = Self::required_approvals(env.clone());
+        let mut approvers = Self::approvers(&env);
+
+        let mut idx: Option<u32> = None;
+        for i in 0..approvers.len() {
+            if approvers.get(i).unwrap() == approver {
+                idx = Some(i);
+                break;
+            }
+        }
+
+        if let Some(i) = idx {
+            approvers.remove(i);
+            if approvers.len() < required {
+                panic_with_error!(&env, UpgradeError::InvalidThreshold);
+            }
+            env.storage()
+                .persistent()
+                .set(&UpgradeKey::Approvers, &approvers);
+
+            UpgradeApproverRemovedEvent {
+                caller: caller.clone(),
+                approver: approver.clone(),
+            }
+            .publish(&env);
+        }
     }
 
     /// Proposes a new implementation hash and target version.

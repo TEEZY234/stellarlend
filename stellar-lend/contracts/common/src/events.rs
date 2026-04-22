@@ -21,6 +21,13 @@ pub struct UpgradeApproverAddedEvent {
 
 #[contractevent]
 #[derive(Clone, Debug)]
+pub struct UpgradeApproverRemovedEvent {
+    pub caller: Address,
+    pub approver: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
 pub struct UpgradeProposedEvent {
     pub caller: Address,
     pub id: u64,
@@ -50,4 +57,3 @@ pub struct UpgradeRollbackEvent {
     pub proposal_id: u64,
     pub prev_version: u32,
 }
-

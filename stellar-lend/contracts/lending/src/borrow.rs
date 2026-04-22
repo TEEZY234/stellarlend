@@ -68,6 +68,10 @@ pub enum BorrowDataKey {
     OracleAddress,
     /// Liquidation threshold in basis points (e.g. 8000 = 80%)
     LiquidationThresholdBps,
+    /// Close factor in basis points (e.g. 5000 = 50%)
+    CloseFactorBps,
+    /// Liquidation incentive in basis points (e.g. 1000 = 10%)
+    LiquidationIncentiveBps,
 }
 
 /// User debt position tracking.
@@ -397,8 +401,15 @@ pub fn initialize_borrow_settings(
 
 pub fn get_user_debt(env: &Env, user: &Address) -> DebtPosition {
     let mut position = get_debt_position(env, user, None);
-    if let Ok(accrued) = calculate_interest(env, &position) {
-        position.interest_accrued = position.interest_accrued.saturating_add(accrued);
+    match calculate_interest(env, &position) {
+        Ok(accrued) => {
+            position.interest_accrued = position.interest_accrued.saturating_add(accrued);
+        }
+        Err(BorrowError::Overflow) => {
+            // Read-only view: saturate rather than under-reporting interest.
+            position.interest_accrued = i128::MAX;
+        }
+        Err(_) => {}
     }
     position
 }
@@ -434,6 +445,22 @@ pub fn get_liquidation_threshold_bps(env: &Env) -> i128 {
         .unwrap_or(8000)
 }
 
+/// Returns close factor in basis points (e.g. 5000 = 50%). Default 5000 if not set.
+pub fn get_close_factor_bps(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::CloseFactorBps)
+        .unwrap_or(5000)
+}
+
+/// Returns liquidation incentive in basis points (e.g. 1000 = 10%). Default 1000 if not set.
+pub fn get_liquidation_incentive_bps(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::LiquidationIncentiveBps)
+        .unwrap_or(1000)
+}
+
 /// Set oracle address for price feeds (admin only). Caller must be admin and authorize.
 pub fn set_oracle(env: &Env, admin: &Address, oracle: Address) -> Result<(), BorrowError> {
     let current = get_admin(env).ok_or(BorrowError::Unauthorized)?;
@@ -464,5 +491,41 @@ pub fn set_liquidation_threshold_bps(
     env.storage()
         .persistent()
         .set(&BorrowDataKey::LiquidationThresholdBps, &bps);
+    Ok(())
+}
+
+/// Set close factor in basis points (admin only). E.g. 5000 = 50%.
+pub fn set_close_factor_bps(env: &Env, admin: &Address, bps: i128) -> Result<(), BorrowError> {
+    let current = get_admin(env).ok_or(BorrowError::Unauthorized)?;
+    if *admin != current {
+        return Err(BorrowError::Unauthorized);
+    }
+    admin.require_auth();
+    if bps <= 0 || bps > 10000 {
+        return Err(BorrowError::InvalidAmount);
+    }
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::CloseFactorBps, &bps);
+    Ok(())
+}
+
+/// Set liquidation incentive in basis points (admin only). E.g. 1000 = 10%.
+pub fn set_liquidation_incentive_bps(
+    env: &Env,
+    admin: &Address,
+    bps: i128,
+) -> Result<(), BorrowError> {
+    let current = get_admin(env).ok_or(BorrowError::Unauthorized)?;
+    if *admin != current {
+        return Err(BorrowError::Unauthorized);
+    }
+    admin.require_auth();
+    if !(0..=10000).contains(&bps) {
+        return Err(BorrowError::InvalidAmount);
+    }
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::LiquidationIncentiveBps, &bps);
     Ok(())
 }

@@ -2,6 +2,7 @@ pub mod access_control_regression_test;
 pub mod admin_test;
 pub mod test_helpers;
 pub mod analytics_test;
+pub mod arithmetic_safety_test;
 pub mod asset_config_test;
 pub mod config_test;
 pub mod deploy_test;

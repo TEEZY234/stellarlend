@@ -26,6 +26,7 @@ pub mod repay;
 pub mod reserve;
 pub mod risk_management;
 pub mod risk_params;
+pub mod safe_math;
 pub mod storage;
 pub mod treasury;
 pub mod types;

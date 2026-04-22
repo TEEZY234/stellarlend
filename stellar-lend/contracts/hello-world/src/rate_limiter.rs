@@ -130,15 +130,14 @@ fn is_grace_enabled(env: &Env, user: &Address, op: &Symbol) -> bool {
 }
 
 fn capacity_tokens(cfg: &RateLimitConfig, grace: bool) -> i128 {
+    // Capacity is derived from config; validate_config ensures non-zero window and max calls.
     let base = (cfg.max_calls_per_window as i128)
-        .saturating_add(cfg.burst_calls as i128);
-    let extra = if grace {
-        cfg.grace_burst_calls as i128
-    } else {
-        0
-    };
-    base.saturating_add(extra)
-        .saturating_mul(TOKEN_SCALE)
+        .checked_add(cfg.burst_calls as i128)
+        .unwrap_or(i128::MAX);
+    let extra = if grace { cfg.grace_burst_calls as i128 } else { 0 };
+    base.checked_add(extra)
+        .and_then(|v| v.checked_mul(TOKEN_SCALE))
+        .unwrap_or(i128::MAX)
 }
 
 fn refill_per_second(cfg: &RateLimitConfig) -> Result<i128, RateLimitError> {
@@ -168,7 +167,11 @@ fn refill_bucket(
     let add = rate
         .checked_mul(dt as i128)
         .ok_or(RateLimitError::Overflow)?;
-    bucket.tokens = (bucket.tokens.saturating_add(add)).min(cap_tokens);
+    bucket.tokens = bucket
+        .tokens
+        .checked_add(add)
+        .ok_or(RateLimitError::Overflow)?
+        .min(cap_tokens);
     bucket.last_refill = now;
     Ok(bucket)
 }

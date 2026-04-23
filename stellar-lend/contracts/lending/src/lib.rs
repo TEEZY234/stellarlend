@@ -5,6 +5,7 @@ pub mod borrow;
 mod deposit;
 pub mod events;
 mod flash_loan;
+pub mod invariants;
 pub mod pause;
 mod token_receiver;
 mod withdraw;

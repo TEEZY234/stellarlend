@@ -18,6 +18,7 @@ import {
   TransactionResponse,
   LendingOperation,
   ProtocolStatsResponse,
+  PositionResponse,
   TransactionHistoryItem,
   TransactionHistoryQuery,
   TransactionHistoryResponse,
@@ -602,6 +603,50 @@ export class StellarService {
       }
 
       nextUrl = response.data._links?.next?.href ?? null;
+    }
+  }
+
+  async getUserPosition(userAddress: string): Promise<PositionResponse> {
+    if (!this.isValidStellarAddress(userAddress)) {
+      throw new InternalServerError('Invalid Stellar address format');
+    }
+
+    const cacheKey = redisCacheService.buildKey('position', userAddress);
+    const cached = await redisCacheService.get<PositionResponse>(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const userParam = new Address(userAddress).toScVal();
+      const raw = await this.simulateContractCall('get_user_position', userParam);
+
+      const collateral = toIntegerString(
+        raw?.collateral ?? raw?.collateral_amount ?? 0
+      );
+      const debt = toIntegerString(raw?.debt ?? raw?.debt_amount ?? 0);
+      const borrowInterest = toIntegerString(raw?.borrow_interest ?? raw?.interest ?? 0);
+      const lastAccrualTime = toSafeNumber(raw?.last_accrual_time ?? raw?.lastAccrualTime ?? 0);
+
+      const collateralBig = BigInt(collateral);
+      const debtBig = BigInt(debt);
+      const collateralRatio =
+        debtBig > 0n
+          ? ((collateralBig * 10000n) / debtBig).toString()
+          : 'Infinity';
+
+      const result: PositionResponse = {
+        userAddress,
+        collateral,
+        debt,
+        borrowInterest,
+        lastAccrualTime,
+        collateralRatio,
+      };
+
+      await redisCacheService.set(cacheKey, result, Math.floor(config.cache.positionTtlMs / 1000));
+      return result;
+    } catch (error) {
+      logger.error('Failed to fetch user position:', error);
+      throw new InternalServerError('Failed to fetch user position');
     }
   }
 

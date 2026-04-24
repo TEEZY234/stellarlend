@@ -6,6 +6,7 @@ mod deposit;
 pub mod events;
 mod flash_loan;
 pub mod pause;
+pub mod rewards;
 mod token_receiver;
 mod withdraw;
 
@@ -16,20 +17,17 @@ pub use borrow::{BorrowCollateral, BorrowError, DebtPosition, StablecoinConfig};
 pub use deposit::{DepositCollateral, DepositError};
 pub use flash_loan::FlashLoanError;
 pub use pause::PauseType;
-pub use views::{
-    ProtocolMetrics, ProtocolReport, StablecoinAssetStats, UserPositionSummary,
-};
+pub use views::{ProtocolMetrics, ProtocolReport, StablecoinAssetStats, UserPositionSummary};
 pub use withdraw::WithdrawError;
 
 use borrow::{
     borrow as borrow_cmd, deposit as borrow_deposit, get_admin as get_borrow_admin,
+    get_stablecoin_config as get_stablecoin_config_logic,
     get_user_collateral as get_borrow_collateral, get_user_debt as get_borrow_debt,
     initialize_borrow_settings as initialize_borrow_logic, repay as borrow_repay,
     set_admin as set_borrow_admin,
     set_liquidation_threshold_bps as set_liquidation_threshold_logic,
-    set_oracle as set_oracle_logic,
-    set_stablecoin_config as set_stablecoin_config_logic,
-    get_stablecoin_config as get_stablecoin_config_logic,
+    set_oracle as set_oracle_logic, set_stablecoin_config as set_stablecoin_config_logic,
 };
 use deposit::{
     deposit as deposit_logic, get_user_collateral as get_deposit_collateral,
@@ -69,6 +67,8 @@ mod math_safety_test;
 #[cfg(test)]
 mod pause_test;
 #[cfg(test)]
+mod stablecoin_test;
+#[cfg(test)]
 mod token_receiver_test;
 #[cfg(test)]
 mod upgrade_test;
@@ -76,8 +76,6 @@ mod upgrade_test;
 mod views_test;
 #[cfg(test)]
 mod withdraw_test;
-#[cfg(test)]
-mod stablecoin_test;
 
 #[contract]
 pub struct LendingContract;
@@ -137,9 +135,15 @@ impl LendingContract {
     /// Repay borrowed assets
     pub fn repay(env: Env, user: Address, asset: Address, amount: i128) -> Result<(), BorrowError> {
         user.require_auth();
+
         if is_paused(&env, PauseType::Repay) {
             return Err(BorrowError::ProtocolPaused);
         }
+
+        /// NEW: Update rewards before debt changes
+        let balance_before = view_collateral_balance(&env, &user);
+        rewards::update_user(&env, &user, balance_before);
+
         borrow_repay(&env, user, asset, amount)
     }
 
@@ -153,7 +157,19 @@ impl LendingContract {
         if is_paused(&env, PauseType::Deposit) {
             return Err(DepositError::DepositPaused);
         }
-        deposit_logic(&env, user, asset, amount)
+
+        /// NEW: Get user balance BEFORE mutation
+        let balance_before = view_collateral_balance(&env, &user);
+
+        /// NEW: Update rewards using previous balance (captures accrued rewards up to now)
+        rewards::update_user(&env, &user, balance_before);
+
+        let result = deposit_logic(&env, user.clone(), asset, amount)?;
+
+        /// NEW: Increase total liquidity AFTER deposit
+        rewards::add_liquidity(&env, amount);
+
+        Ok(result)
     }
 
     /// Deposit collateral for a borrow position
@@ -185,6 +201,32 @@ impl LendingContract {
         }
         // Stub implementation, or call borrow::liquidate if it exists
         Ok(())
+    }
+
+    /// NEW: Set reward emission rate (admin only)
+    pub fn set_emission_rate(env: Env, admin: Address, rate: i128) -> Result<(), BorrowError> {
+        let current_admin = get_borrow_admin(&env).ok_or(BorrowError::Unauthorized)?;
+
+        if admin != current_admin {
+            return Err(BorrowError::Unauthorized);
+        }
+
+        admin.require_auth();
+
+        rewards::set_emission_rate(&env, rate);
+
+        Ok(())
+    }
+
+    // Claim accumulated liquidity mining rewards
+    pub fn claim_rewards(env: Env, user: Address) -> i128 {
+        user.require_auth();
+
+        // Bring rewards up-to-date before claiming
+        let balance = view_collateral_balance(&env, &user);
+        rewards::update_user(&env, &user, balance);
+
+        rewards::claim(&env, &user)
     }
 
     /// Get user's debt position
@@ -304,7 +346,19 @@ impl LendingContract {
         if is_paused(&env, PauseType::Withdraw) {
             return Err(WithdrawError::WithdrawPaused);
         }
-        withdraw_logic(&env, user, asset, amount)
+
+        // Get balance BEFORE mutation
+        let balance_before = view_collateral_balance(&env, &user);
+
+        // Update rewards before reducing balance
+        rewards::update_user(&env, &user, balance_before);
+
+        let result = withdraw_logic(&env, user.clone(), asset, amount)?;
+
+        // Reduce total liquidity AFTER withdrawal
+        rewards::remove_liquidity(&env, amount);
+
+        Ok(result)
     }
 
     /// Initialize withdraw settings (admin only)
@@ -356,10 +410,7 @@ impl LendingContract {
     }
 
     /// Get protocol report including stablecoin stats
-    pub fn get_protocol_report(
-        env: Env,
-        stablecoin_assets: Vec<Address>,
-    ) -> ProtocolReport {
+    pub fn get_protocol_report(env: Env, stablecoin_assets: Vec<Address>) -> ProtocolReport {
         views::get_protocol_report(&env, stablecoin_assets)
     }
 }

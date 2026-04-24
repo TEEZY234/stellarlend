@@ -1,6 +1,8 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Val, Vec};
 
+use soroban_sdk::contracttype;
+
 pub mod borrow;
 mod deposit;
 pub mod events;
@@ -16,20 +18,17 @@ pub use borrow::{BorrowCollateral, BorrowError, DebtPosition, StablecoinConfig};
 pub use deposit::{DepositCollateral, DepositError};
 pub use flash_loan::FlashLoanError;
 pub use pause::PauseType;
-pub use views::{
-    ProtocolMetrics, ProtocolReport, StablecoinAssetStats, UserPositionSummary,
-};
+pub use views::{ProtocolMetrics, ProtocolReport, StablecoinAssetStats, UserPositionSummary};
 pub use withdraw::WithdrawError;
 
 use borrow::{
     borrow as borrow_cmd, deposit as borrow_deposit, get_admin as get_borrow_admin,
+    get_stablecoin_config as get_stablecoin_config_logic,
     get_user_collateral as get_borrow_collateral, get_user_debt as get_borrow_debt,
     initialize_borrow_settings as initialize_borrow_logic, repay as borrow_repay,
     set_admin as set_borrow_admin,
     set_liquidation_threshold_bps as set_liquidation_threshold_logic,
-    set_oracle as set_oracle_logic,
-    set_stablecoin_config as set_stablecoin_config_logic,
-    get_stablecoin_config as get_stablecoin_config_logic,
+    set_oracle as set_oracle_logic, set_stablecoin_config as set_stablecoin_config_logic,
 };
 use deposit::{
     deposit as deposit_logic, get_user_collateral as get_deposit_collateral,
@@ -53,6 +52,20 @@ use withdraw::{
     initialize_withdraw_settings as initialize_withdraw_logic,
     set_withdraw_paused as set_withdraw_paused_logic, withdraw as withdraw_logic,
 };
+
+#[derive(Clone)]
+#[contracttype]
+pub enum BadDebtKey {
+    Total,
+    User(Address),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum ReserveKey {
+    ProtocolReserves,
+}
+
 mod data_store;
 pub mod upgrade;
 
@@ -69,6 +82,8 @@ mod math_safety_test;
 #[cfg(test)]
 mod pause_test;
 #[cfg(test)]
+mod stablecoin_test;
+#[cfg(test)]
 mod token_receiver_test;
 #[cfg(test)]
 mod upgrade_test;
@@ -76,8 +91,6 @@ mod upgrade_test;
 mod views_test;
 #[cfg(test)]
 mod withdraw_test;
-#[cfg(test)]
-mod stablecoin_test;
 
 #[contract]
 pub struct LendingContract;
@@ -97,6 +110,34 @@ impl LendingContract {
         set_borrow_admin(&env, &admin);
         initialize_borrow_logic(&env, debt_ceiling, min_borrow_amount)?;
         Ok(())
+    }
+
+    // Bad debt helper functions
+    pub fn get_total_bad_debt(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&BadDebtKey::Total)
+            .unwrap_or(0)
+    }
+
+    pub fn add_bad_debt(env: &Env, user: &Address, amount: i128) {
+        let mut total = Self::get_total_bad_debt(env);
+        total += amount;
+
+        env.storage().persistent().set(&BadDebtKey::Total, &total);
+
+        let user_key = BadDebtKey::User(user.clone());
+        let mut user_debt = env.storage().persistent().get(&user_key).unwrap_or(0);
+        user_debt += amount;
+
+        env.storage().persistent().set(&user_key, &user_debt);
+    }
+
+    pub fn get_reserves(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&ReserveKey::ProtocolReserves)
+            .unwrap_or(0)
     }
 
     /// Borrow assets against deposited collateral
@@ -174,19 +215,42 @@ impl LendingContract {
     pub fn liquidate(
         env: Env,
         liquidator: Address,
-        _borrower: Address,
-        _debt_asset: Address,
-        _collateral_asset: Address,
-        _amount: i128,
+        borrower: Address,
+        debt_asset: Address,
+        collateral_asset: Address,
+        repay_amount: i128,
     ) -> Result<(), BorrowError> {
         liquidator.require_auth();
+
         if is_paused(&env, PauseType::Liquidation) {
             return Err(BorrowError::ProtocolPaused);
         }
-        // Stub implementation, or call borrow::liquidate if it exists
+
+        // 1. Get borrower state
+        let debt_value = view_debt_value(&env, &borrower.clone());
+        let collateral_value = view_collateral_value(&env, &borrower.clone());
+
+        // 2. Ensure liquidatable
+        let health = view_health_factor(&env, &borrower.clone());
+        if health >= 10000 {
+            return Err(BorrowError::PositionHealthy);
+        }
+
+        // 3. Perform liquidation logic (simplified)
+        let recovered_value = repay_amount; // (you’ll replace with real calc)
+
+        // 4. Detect bad debt
+        if recovered_value < debt_value {
+            let bad_debt = debt_value - recovered_value;
+
+            Self::add_bad_debt(&env, &borrower, bad_debt);
+
+            // Optional: emit event
+            events::emit_bad_debt(&env, &borrower, bad_debt);
+        }
+
         Ok(())
     }
-
     /// Get user's debt position
     pub fn get_user_debt(env: Env, user: Address) -> DebtPosition {
         get_borrow_debt(&env, &user)
@@ -356,10 +420,38 @@ impl LendingContract {
     }
 
     /// Get protocol report including stablecoin stats
-    pub fn get_protocol_report(
-        env: Env,
-        stablecoin_assets: Vec<Address>,
-    ) -> ProtocolReport {
+    pub fn get_protocol_report(env: Env, stablecoin_assets: Vec<Address>) -> ProtocolReport {
         views::get_protocol_report(&env, stablecoin_assets)
+    }
+
+    pub fn recover_bad_debt(env: Env, admin: Address, amount: i128) -> Result<(), BorrowError> {
+        let current_admin = get_borrow_admin(&env).ok_or(BorrowError::Unauthorized)?;
+        if admin != current_admin {
+            return Err(BorrowError::Unauthorized);
+        }
+        admin.require_auth();
+
+        let mut reserves = Self::get_reserves(&env);
+        let mut bad_debt = Self::get_total_bad_debt(&env);
+
+        if reserves < amount {
+            return Err(BorrowError::InsufficientReserves);
+        }
+
+        let repay_amount = if amount > bad_debt { bad_debt } else { amount };
+
+        reserves -= repay_amount;
+        bad_debt -= repay_amount;
+
+        env.storage()
+            .persistent()
+            .set(&ReserveKey::ProtocolReserves, &reserves);
+        env.storage()
+            .persistent()
+            .set(&BadDebtKey::Total, &bad_debt);
+
+        events::emit_bad_debt_recovered(&env, repay_amount);
+
+        Ok(())
     }
 }

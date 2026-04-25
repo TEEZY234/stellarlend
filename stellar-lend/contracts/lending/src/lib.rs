@@ -1,5 +1,13 @@
 //! Standardized contract events (V1 schema)
 
+pub mod borrow;
+mod deposit;
+pub mod events;
+mod flash_loan;
+pub mod invariants;
+pub mod pause;
+mod token_receiver;
+mod withdraw;
 use soroban_sdk::{contractevent, Address, Symbol};
 
 // ─────────────────────────────────────────

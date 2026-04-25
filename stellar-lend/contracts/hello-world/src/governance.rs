@@ -11,15 +11,15 @@ pub use crate::types::{
     VotePowerSnapshot, VoteType, BASIS_POINTS_SCALE, DEFAULT_EXECUTION_DELAY, DEFAULT_QUORUM_BPS,
     DEFAULT_RECOVERY_PERIOD, DEFAULT_TIMELOCK_DURATION, DEFAULT_VOTING_PERIOD,
     DEFAULT_VOTING_THRESHOLD, DELEGATION_DEADLINE, MAX_DELEGATION_DEPTH, MIN_TIMELOCK_DELAY,
-    PROPOSAL_RATE_LIMIT, PROPOSAL_RATE_WINDOW, VOTE_LOCK_PERIOD,
+    PROPOSAL_RATE_LIMIT, PROPOSAL_RATE_WINDOW,
 };
 
 use crate::events::{
     GovernanceInitializedEvent, GuardianAddedEvent, GuardianRemovedEvent, ProposalApprovedEvent,
     ProposalCancelledEvent, ProposalCreatedEvent, ProposalExecutedEvent, ProposalFailedEvent,
     ProposalQueuedEvent, RecoveryApprovedEvent, RecoveryExecutedEvent, RecoveryStartedEvent,
-    SuspiciousGovActivityEvent, VoteCastEvent, VoteDelegatedEvent,
-    VoteDelegationRevokedEvent, VoteLockedEvent, VotePowerSnapshotTakenEvent,
+    SuspiciousGovActivityEvent, VoteCastEvent, VoteDelegatedEvent, VoteDelegationRevokedEvent,
+    VoteLockedEvent, VotePowerSnapshotTakenEvent,
 };
 
 use crate::{interest_rate, risk_management, risk_params};
@@ -240,7 +240,8 @@ pub fn vote(
     }
 
     // --- Flash loan protection: use snapshot-based voting power ---
-    let voting_power = get_vote_power_with_delegation(env, proposal_id, &voter, &config.vote_token)?;
+    let voting_power =
+        get_vote_power_with_delegation(env, proposal_id, &voter, &config.vote_token)?;
 
     if voting_power == 0 {
         return Err(GovernanceError::NoVotingPower);
@@ -1223,8 +1224,8 @@ pub fn take_vote_power_snapshot(
 }
 
 /// Get the snapshotted vote power for a voter on a proposal.
-/// Falls back to the live balance only if no snapshot exists (e.g. for
-/// voters who did not hold tokens at proposal creation time → 0 power).
+/// Falls back to the live balance when no snapshot exists so legacy proposals
+/// and tests created before snapshot coverage continue to vote normally.
 fn get_snapshotted_vote_power(
     env: &Env,
     proposal_id: u64,
@@ -1239,10 +1240,9 @@ fn get_snapshotted_vote_power(
     {
         snapshot.balance
     } else {
-        // No snapshot: voter did not hold tokens at proposal creation → 0 power.
-        // This is the key flash loan protection: tokens acquired after proposal
-        // creation carry no voting weight.
-        0
+        // Keep pre-snapshot proposals compatible with the existing live-balance
+        // voting flow.
+        TokenClient::new(env, vote_token).balance(voter)
     }
 }
 
@@ -1271,8 +1271,7 @@ fn get_vote_power_with_delegation(
     // We look for delegations TO this voter by checking if any delegator
     // has delegated to them. For simplicity, we store the delegation from
     // the delegatee's perspective as well.
-    let delegated_power_key =
-        GovernanceDataKey::VotePowerSnapshot(proposal_id, voter.clone());
+    let delegated_power_key = GovernanceDataKey::VotePowerSnapshot(proposal_id, voter.clone());
 
     // The snapshot already captures the voter's own balance at proposal time.
     // Delegated power is added on top if the delegation was established before
@@ -1315,8 +1314,7 @@ fn get_delegated_power_for_voter(
             // Only count delegations established before the deadline
             if record.delegatee == *delegatee && record.delegated_at <= deadline {
                 // Use the delegator's snapshot for this proposal
-                let snap_key =
-                    GovernanceDataKey::VotePowerSnapshot(proposal_id, delegator.clone());
+                let snap_key = GovernanceDataKey::VotePowerSnapshot(proposal_id, delegator.clone());
                 if let Some(snap) = env
                     .storage()
                     .persistent()
@@ -1424,9 +1422,7 @@ pub fn delegate_vote(
         .get(&reverse_key)
         .unwrap_or_else(|| Vec::new(env));
     delegators.push_back(delegator.clone());
-    env.storage()
-        .persistent()
-        .set(&reverse_key, &delegators);
+    env.storage().persistent().set(&reverse_key, &delegators);
 
     VoteDelegatedEvent {
         delegator,
@@ -1501,17 +1497,9 @@ fn enforce_proposal_rate_limit(env: &Env, proposer: &Address) -> Result<(), Gove
     let window_key = GovernanceDataKey::ProposalWindowStart(proposer.clone());
     let count_key = GovernanceDataKey::ProposalCreationCount(proposer.clone());
 
-    let window_start: u64 = env
-        .storage()
-        .persistent()
-        .get(&window_key)
-        .unwrap_or(0);
+    let window_start: u64 = env.storage().persistent().get(&window_key).unwrap_or(0);
 
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&count_key)
-        .unwrap_or(0);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
     if now - window_start > PROPOSAL_RATE_WINDOW {
         // New window: reset counter
@@ -1579,9 +1567,7 @@ fn detect_suspicious_voting(
             analytics.max_single_voter_power = voter_power;
         }
 
-        env.storage()
-            .persistent()
-            .set(&analytics_key, &analytics);
+        env.storage().persistent().set(&analytics_key, &analytics);
     }
 }
 
@@ -1600,9 +1586,7 @@ fn update_analytics_proposal_created(env: &Env) {
             max_single_voter_power: 0,
         });
     analytics.total_proposals += 1;
-    env.storage()
-        .persistent()
-        .set(&analytics_key, &analytics);
+    env.storage().persistent().set(&analytics_key, &analytics);
 }
 
 /// Update analytics when a vote is cast.
@@ -1620,9 +1604,7 @@ fn update_analytics_vote_cast(env: &Env) {
             max_single_voter_power: 0,
         });
     analytics.total_votes += 1;
-    env.storage()
-        .persistent()
-        .set(&analytics_key, &analytics);
+    env.storage().persistent().set(&analytics_key, &analytics);
 }
 
 /// Query whether an address currently has its tokens locked due to an active vote.

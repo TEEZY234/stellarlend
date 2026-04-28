@@ -119,7 +119,6 @@ pub struct BorrowCollateral {
 }
 
 const COLLATERAL_RATIO_MIN: i128 = 15000; // 150% in basis points
-const INTEREST_RATE_PER_YEAR: i128 = 500; // 5% in basis points
 const SECONDS_PER_YEAR: u64 = 31536000;
 
 /// Borrow assets against deposited collateral (requires direct user authorization).
@@ -370,7 +369,12 @@ pub(crate) fn calculate_interest(env: &Env, position: &DebtPosition) -> Result<i
     let time_elapsed = current_time.saturating_sub(position.last_update);
 
     let borrowed_256 = I256::from_i128(env, position.borrowed_amount);
-    let rate_256 = I256::from_i128(env, INTEREST_RATE_PER_YEAR);
+    let borrow_rate_bps = crate::interest_rate::borrow_rate_bps(env)
+        .map_err(|e| {
+            let be: BorrowError = e.into();
+            be
+        })?;
+    let rate_256 = I256::from_i128(env, borrow_rate_bps);
     let time_256 = I256::from_i128(env, time_elapsed as i128);
 
     let mut interest_256 = borrowed_256
@@ -515,6 +519,7 @@ pub fn initialize_borrow_settings(
     env.storage()
         .persistent()
         .set(&BorrowDataKey::BorrowMinAmount, &min_borrow_amount);
+    crate::interest_rate::set_default_if_missing(env);
     Ok(())
 }
 

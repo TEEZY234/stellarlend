@@ -37,3 +37,13 @@ pub struct GuardianConfig {
     pub guardians: Vec<Address>,
     pub threshold: u32,
 }
+
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey {
+    // Liquidation queue keys
+    LiquidationQueueConfig,
+    NextLiquidationQueueId,
+    LiquidationQueueEntry(u64),
+    LiquidatorRegistration(Address),
+}

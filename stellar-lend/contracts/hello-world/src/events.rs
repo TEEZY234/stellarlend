@@ -669,3 +669,36 @@ pub fn emit_fee_config_updated(e: &Env, event: FeeConfigUpdatedEvent) {
 pub fn emit_liquidation_fee_collected(e: &Env, event: LiquidationFeeCollectedEvent) {
     event.publish(e);
 }
+
+// ============================================================================
+// Liquidation Queue Events
+// ============================================================================
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LiquidationQueuedEvent {
+    pub entry_id: u64,
+    pub borrower: Address,
+    pub liquidator: Address,
+    pub health_factor: i128,
+    pub priority_score: i128,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LiquidationProcessedEvent {
+    pub entry_id: u64,
+    pub borrower: Address,
+    pub liquidator: Address,
+    pub executor: Address,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LiquidationCancelledEvent {
+    pub entry_id: u64,
+    pub caller: Address,
+    pub timestamp: u64,
+}

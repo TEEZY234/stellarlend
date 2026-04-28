@@ -17,6 +17,7 @@ pub mod governance;
 pub mod intents;
 pub mod interest_rate;
 pub mod liquidate;
+pub mod liquidation_queue;
 pub mod mev_protection;
 pub mod multi_collateral;
 pub mod multisig;
@@ -1083,6 +1084,77 @@ impl HelloContract {
         freeze: bool,
     ) -> Result<(), LendingError> {
         cross_asset::freeze_pool(&env, caller, asset, freeze).map_err(Into::into)
+    }
+
+    // -------------------------------------------------------------------------
+    // Liquidation Priority Queue (Issue #188)
+    // -------------------------------------------------------------------------
+
+    /// Initialize liquidation queue
+    pub fn initialize_liquidation_queue(
+        env: Env,
+        config: liquidation_queue::QueueConfig,
+    ) -> Result<(), LendingError> {
+        liquidation_queue::initialize_queue(&env, config)
+    }
+
+    /// Register liquidator interest in unhealthy position
+    pub fn register_liquidation_interest(
+        env: Env,
+        liquidator: Address,
+        borrower: Address,
+    ) -> Result<u64, LendingError> {
+        liquidation_queue::register_liquidation_interest(&env, liquidator, borrower)
+    }
+
+    /// Get next liquidation from queue
+    pub fn get_next_liquidation(
+        env: Env,
+    ) -> Option<liquidation_queue::LiquidationQueueEntry> {
+        liquidation_queue::get_next_liquidation(&env)
+    }
+
+    /// Process liquidation from queue
+    pub fn process_queue_liquidation(
+        env: Env,
+        entry_id: u64,
+        executor: Address,
+    ) -> Result<(), LendingError> {
+        liquidation_queue::process_queue_liquidation(&env, entry_id, executor)
+    }
+
+    /// Cancel queue entry
+    pub fn cancel_queue_entry(
+        env: Env,
+        entry_id: u64,
+        caller: Address,
+    ) -> Result<(), LendingError> {
+        liquidation_queue::cancel_queue_entry(&env, entry_id, caller)
+    }
+
+    /// Get all pending queue entries
+    pub fn get_pending_queue_entries(
+        env: Env,
+    ) -> Vec<liquidation_queue::LiquidationQueueEntry> {
+        liquidation_queue::get_pending_queue_entries(&env)
+    }
+
+    /// Get queue entry by ID
+    pub fn get_queue_entry(
+        env: Env,
+        entry_id: u64,
+    ) -> Option<liquidation_queue::LiquidationQueueEntry> {
+        liquidation_queue::get_queue_entry(&env, entry_id)
+    }
+
+    /// Cleanup expired entries
+    pub fn cleanup_expired_queue_entries(env: Env) -> u32 {
+        liquidation_queue::cleanup_expired_entries(&env)
+    }
+
+    /// Get queue statistics
+    pub fn get_queue_stats(env: Env) -> liquidation_queue::QueueStats {
+        liquidation_queue::get_queue_stats(&env)
     }
 }
 
